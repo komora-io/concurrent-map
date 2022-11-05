@@ -1,0 +1,17 @@
+[package]
+name = "concurrent-map"
+authors = ["Tyler Neely <tylerneely@gmail.com>"]
+description = "a lock-free linearizable map"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0"
+repository = "https://github.com/komora-io/concurrent-map"
+keywords = ["lock-free", "multi-threaded", "performance", "index"]
+categories = ["concurrency", "data-structures", "rust-patterns"]
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ebr = "0.0.5"
+pagetable = "0.3"
