@@ -15,6 +15,58 @@ struct Node<T: Send> {
 unsafe impl<T: Send> Send for Node<T> {}
 
 #[derive(Default, Clone, Debug)]
+pub struct ConcurrentStackPusher<T: 'static + Send> {
+    head: Arc<AtomicPtr<Node<T>>>,
+}
+
+impl<T: Send> Drop for ConcurrentStackPusher<T> {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.head) != 1 {
+            return;
+        }
+
+        let mut cursor = self.head.load(Ordering::Acquire);
+        while !cursor.is_null() {
+            let mut node: Box<Node<T>> = unsafe { Box::from_raw(cursor) };
+            unsafe {
+                ManuallyDrop::drop(&mut node.item);
+            }
+            cursor = node.next;
+        }
+    }
+}
+
+impl<T: Send> ConcurrentStackPusher<T> {
+    pub fn push(&self, item: T) {
+        let mut head = self.head.load(Ordering::Acquire);
+
+        let node = Box::new(Node {
+            item: ManuallyDrop::new(item),
+            next: head,
+        });
+
+        let node_ptr = Box::into_raw(node);
+
+        loop {
+            let install_res =
+                self.head
+                    .compare_exchange(head, node_ptr, Ordering::AcqRel, Ordering::Acquire);
+
+            match install_res {
+                Ok(_) => return,
+                Err(actual_head) => {
+                    head = actual_head;
+
+                    unsafe {
+                        (*node_ptr).next = head;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default, Clone, Debug)]
 pub struct ConcurrentStack<T: 'static + Send> {
     head: Arc<AtomicPtr<Node<T>>>,
     ebr: Ebr<Box<Node<T>>>,
@@ -22,6 +74,10 @@ pub struct ConcurrentStack<T: 'static + Send> {
 
 impl<T: Send> Drop for ConcurrentStack<T> {
     fn drop(&mut self) {
+        if Arc::strong_count(&self.head) != 1 {
+            return;
+        }
+
         let mut cursor = self.head.load(Ordering::Acquire);
         while !cursor.is_null() {
             let mut node: Box<Node<T>> = unsafe { Box::from_raw(cursor) };
@@ -88,6 +144,15 @@ impl<T: Send> ConcurrentStack<T> {
         }
 
         None
+    }
+
+    /// Returns a push-only stack handle. This is better
+    /// to use where possible, because it avoids registering
+    /// shared state with the epoch-based reclamation system.
+    pub fn get_pusher(&self) -> ConcurrentStackPusher<T> {
+        ConcurrentStackPusher {
+            head: self.head.clone(),
+        }
     }
 }
 

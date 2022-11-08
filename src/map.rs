@@ -1,5 +1,6 @@
 #![allow(unused)]
 use std::collections::BTreeMap;
+use std::fmt;
 use std::ops::{Bound, Deref};
 use std::ptr::NonNull;
 use std::sync::{
@@ -10,16 +11,45 @@ use std::sync::{
 use ebr::{Ebr, Guard};
 use pagetable::PageTable;
 
-use crate::ConcurrentStack;
+use crate::{ConcurrentStack, ConcurrentStackPusher};
 
-const SPLIT_SIZE: usize = 4;
+// TODO make this much much much larger
+const MAX_LOOPS: usize = 1024 * 1024;
+
+const SPLIT_SIZE: usize = 8;
+const MERGE_SIZE: usize = 2;
 
 type Id = u64;
 
+enum Deferred<K, V>
+where
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
+{
+    DropNode(Box<Node<K, V>>),
+    MarkIdReusable {
+        stack: ConcurrentStackPusher<u64>,
+        id: Id,
+    },
+}
+
+impl<K, V> Drop for Deferred<K, V>
+where
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
+{
+    fn drop(&mut self) {
+        if let Deferred::MarkIdReusable { stack, id } = self {
+            stack.push(*id);
+        }
+    }
+}
+
+#[derive(Debug)]
 struct NodeView<'a, K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     ptr: NonNull<Node<K, V>>,
     slot: &'a AtomicPtr<Node<K, V>>,
@@ -28,16 +58,22 @@ where
 
 impl<'a, K, V> NodeView<'a, K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
-    /// Try to replace
+    /// Try to replace. If the node has been deleted since we got our view,
+    /// an Err(None) is returned.
     fn cas(
         &self,
         replacement: Box<Node<K, V>>,
-        guard: &mut Guard<'a, Box<Node<K, V>>>,
-    ) -> Result<NodeView<'a, K, V>, ()> {
+        guard: &mut Guard<'a, Deferred<K, V>>,
+    ) -> Result<NodeView<'a, K, V>, Option<NodeView<'a, K, V>>> {
+        // println!("replacing:");
+        // println!("nodeview:     {:?}", *self);
+        // println!("current:      {:?}", **self);
+        // println!("new:          {:?}", *replacement);
         let replacement_ptr = Box::into_raw(replacement);
+
         let res = self.slot.compare_exchange(
             self.ptr.as_ptr(),
             replacement_ptr,
@@ -48,18 +84,26 @@ where
         match res {
             Ok(_) => {
                 let replaced: Box<Node<K, V>> = unsafe { Box::from_raw(self.ptr.as_ptr()) };
-                guard.defer_drop(replaced);
+                guard.defer_drop(Deferred::DropNode(replaced));
                 Ok(NodeView {
                     slot: self.slot,
                     ptr: NonNull::new(replacement_ptr).unwrap(),
                     id: self.id,
                 })
             }
-            Err(_) => {
+            Err(actual) => {
                 let failed_value = unsafe { Box::from_raw(replacement_ptr) };
                 drop(failed_value);
 
-                Err(())
+                if actual.is_null() {
+                    Err(None)
+                } else {
+                    Err(Some(NodeView {
+                        ptr: NonNull::new(actual).unwrap(),
+                        slot: self.slot,
+                        id: self.id,
+                    }))
+                }
             }
         }
     }
@@ -67,8 +111,8 @@ where
 
 impl<'a, K, V> Deref for NodeView<'a, K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     type Target = Node<K, V>;
 
@@ -80,10 +124,10 @@ where
 #[derive(Clone)]
 pub struct ConcurrentMap<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
-    ebr: Ebr<Box<Node<K, V>>>,
+    ebr: Ebr<Deferred<K, V>>,
     idgen: Arc<AtomicU64>,
     inner: Arc<Inner<K, V>>,
     free_ids: ConcurrentStack<u64>,
@@ -91,8 +135,8 @@ where
 
 impl<K, V> Default for ConcurrentMap<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     fn default() -> ConcurrentMap<K, V> {
         let initial_root_id = 0;
@@ -130,8 +174,8 @@ where
 #[derive(Default)]
 pub struct Inner<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     root_id: AtomicU64,
     table: PageTable<AtomicPtr<Node<K, V>>>,
@@ -139,15 +183,14 @@ where
 
 impl<K, V> Drop for Inner<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     fn drop(&mut self) {
         let mut ebr = Ebr::default();
         let mut guard = ebr.pin();
 
-        let root_id = self.root_id.load(Ordering::Acquire);
-        let mut cursor = self.view_for_id(root_id, &mut guard);
+        let mut cursor = self.root(&mut guard);
 
         let mut lhs_chain = vec![];
         loop {
@@ -157,13 +200,13 @@ where
             }
             let child_id = *cursor.index.iter().next().unwrap().1;
 
-            cursor = self.view_for_id(child_id, &mut guard);
+            cursor = self.view_for_id(child_id, &mut guard).unwrap();
         }
 
         for lhs_id in lhs_chain {
             let mut next_opt = Some(lhs_id);
             while let Some(next) = next_opt {
-                let cursor = self.view_for_id(next, &mut guard);
+                let cursor = self.view_for_id(next, &mut guard).unwrap();
                 next_opt = cursor.next;
                 let node_box = unsafe { Box::from_raw(cursor.ptr.as_ptr()) };
                 drop(node_box);
@@ -174,8 +217,8 @@ where
 
 impl<K, V> ConcurrentMap<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     pub fn get(&mut self, key: &K) -> Option<Arc<V>> {
         let mut guard = self.ebr.pin();
@@ -302,11 +345,11 @@ where
 
 struct Iter<'a, K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     inner: &'a Inner<K, V>,
-    guard: Guard<'a, Box<Node<K, V>>>,
+    guard: Guard<'a, Deferred<K, V>>,
     lo: Bound<Arc<K>>,
     hi: Bound<Arc<K>>,
     current: NodeView<'a, K, V>,
@@ -314,9 +357,9 @@ where
 
 impl<'a, K, V> Iterator for Iter<'a, K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
     Bound<Arc<K>>: PartialOrd,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     type Item = (Arc<K>, Arc<V>);
     fn next(&mut self) -> Option<Self::Item> {
@@ -334,9 +377,9 @@ where
 /*
 impl<'a, K, V> IntoIterator for &'a mut ConcurrentMap<K, V>
 where
-    K: 'static + Clone + std::fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + Clone + fmt::Debug + Default + Ord + Send + Sync,
     Bound<Arc<K>>: PartialOrd,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     type Item = (Arc<K>, Arc<V>);
     type IntoIter = Iter<'a, K, V>;
@@ -347,26 +390,46 @@ where
 }
 */
 
+/*
+impl<K, V> fmt::Debug for Inner<K, V>
+where
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Inner").finish()
+    }
+}
+*/
+
 impl<K, V> Inner<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     fn view_for_id<'a>(
         &'a self,
         id: Id,
-        _guard: &mut Guard<'a, Box<Node<K, V>>>,
-    ) -> NodeView<'a, K, V> {
+        _guard: &mut Guard<'a, Deferred<K, V>>,
+    ) -> Option<NodeView<'a, K, V>> {
         let slot = self.table.get(id);
-        let ptr = NonNull::new(slot.load(Ordering::Acquire)).unwrap();
+        let ptr = NonNull::new(slot.load(Ordering::Acquire))?;
 
-        NodeView { ptr, slot, id }
+        Some(NodeView { ptr, slot, id })
     }
 
-    fn leftmost_leaf<'a>(&'a self, guard: &mut Guard<'a, Box<Node<K, V>>>) -> NodeView<'a, K, V> {
-        let root_id = self.root_id.load(Ordering::Acquire);
+    fn root<'a>(&'a self, guard: &mut Guard<'a, Deferred<K, V>>) -> NodeView<'a, K, V> {
+        loop {
+            let root_id = self.root_id.load(Ordering::Acquire);
 
-        let mut cursor = self.view_for_id(root_id, guard);
+            if let Some(view) = self.view_for_id(root_id, guard) {
+                return view;
+            }
+        }
+    }
+
+    fn leftmost_leaf<'a>(&'a self, guard: &mut Guard<'a, Deferred<K, V>>) -> NodeView<'a, K, V> {
+        let mut cursor = self.root(guard);
 
         let mut lhs_chain = vec![];
         loop {
@@ -376,8 +439,202 @@ where
             }
             let child_id = *cursor.index.iter().next().unwrap().1;
 
-            cursor = self.view_for_id(child_id, guard);
+            cursor = self.view_for_id(child_id, guard).unwrap();
         }
+    }
+
+    // lock-free merging:
+    // 1. try to mark the parent's merging_child
+    //  a. must not be the left-most child
+    //  b. if unsuccessful, give up
+    // 2. mark the child as merging
+    // 3. find the left sibling
+    // 4. cas the left sibling to eat the right sibling
+    //  a. loop until successful
+    //  b. go right if the left-most child split and no-longer points to merging child
+    // 5. cas the parent to remove the merged child
+    // 6. remove the child's pointer in the page table
+    // 7. defer the reclamation of the child node
+    // 8. defer putting the child's ID into the free stack
+    //
+    // merge threshold must be >= 1, because otherwise index nodes with 1 empty
+    // child will never be compactible.
+
+    fn install_parent_merge<'a>(
+        &'a self,
+        parent: &NodeView<'a, K, V>,
+        child: &NodeView<'a, K, V>,
+        guard: &mut Guard<'a, Deferred<K, V>>,
+    ) -> Result<NodeView<'a, K, V>, ()> {
+        // 1. try to mark the parent's merging_child
+        //  a. must not be the left-most child
+        //  b. if unsuccessful, give up
+        let is_leftmost_child = parent.index.iter().next().unwrap().0 == &child.lo;
+
+        if is_leftmost_child {
+            return Err(());
+        }
+
+        assert!(parent.merging_child.is_none());
+
+        let mut parent_clone: Box<Node<K, V>> = Box::new((*parent).clone());
+        parent_clone.merging_child = Some(child.id);
+        parent.cas(parent_clone, guard).map_err(|_| ())
+    }
+
+    fn merge_child<'a>(
+        &'a self,
+        parent: &mut NodeView<'a, K, V>,
+        child: &mut NodeView<'a, K, V>,
+        free_ids: &ConcurrentStack<u64>,
+        guard: &mut Guard<'a, Deferred<K, V>>,
+    ) {
+        // 2. mark child as merging
+        while !child.is_merging {
+            let mut child_clone: Box<Node<K, V>> = Box::new((*child).clone());
+            child_clone.is_merging = true;
+            *child = match child.cas(child_clone, guard) {
+                Ok(new_child) | Err(Some(new_child)) => new_child,
+                Err(None) => {
+                    // child already removed
+                    /*
+                    println!(
+                        "returning early from merge_child because \
+                        the merging child has already been freed"
+                    );
+                    */
+                    return;
+                }
+            };
+        }
+
+        // 3. find the left sibling
+        let first_left_sibling_guess = parent
+            .index
+            .range::<Arc<K>, _>(..&child.lo)
+            .next_back()
+            .unwrap()
+            .1;
+        let mut left_sibling =
+            if let Some(view) = self.view_for_id(*first_left_sibling_guess, guard) {
+                view
+            } else {
+                // the merge already completed and this left sibling has already also been merged
+                /*
+                println!(
+                    "returning early from merge_child because the \
+                    first left sibling guess is freed, meaning the \
+                    merge already succeeded"
+                );
+                */
+                return;
+            };
+
+        loop {
+            if child.hi.is_some() && left_sibling.hi >= child.hi {
+                // step 4 happened concurrently
+                // println!("breaking from the left sibling install loop because left_sibling.hi ({:?}) >= child.hi ({:?})", left_sibling.hi, child.hi);
+                break;
+            }
+
+            let next = left_sibling.next.unwrap();
+            if next != child.id {
+                left_sibling = if let Some(view) = self.view_for_id(next, guard) {
+                    view
+                } else {
+                    // the merge already completed and this left sibling has already also been merged
+                    /*
+                    println!(
+                        "returning early from merge_child because one of the left siblings \
+                        of the merging child is already freed, meaning \
+                        the merge must have completed already"
+                    );
+                    */
+                    return;
+                };
+                continue;
+            }
+
+            // 4. cas the left sibling to eat the right sibling
+            //  a. loop until successful
+            //  b. go right if the left-most child split and no-longer points to merging child
+            let mut left_sibling_clone: Box<Node<K, V>> = Box::new((*left_sibling).clone());
+            left_sibling_clone.merge(child);
+            let cas_result = left_sibling.cas(left_sibling_clone, guard);
+            match cas_result {
+                Ok(_) => {
+                    // println!("successfully merged child into its left sibling");
+                    break;
+                }
+                Err(Some(actual)) => left_sibling = actual,
+                Err(None) => {
+                    /*
+                    println!(
+                        "returning early from merge_child because \
+                        one of the left siblings has already been \
+                        freed, implying the original merge completed."
+                    );
+                    */
+                    return;
+                }
+            }
+        }
+
+        // 5. cas the parent to remove the merged child
+        while parent.merging_child == Some(child.id) {
+            let mut parent_clone: Box<Node<K, V>> = Box::new((*parent).clone());
+            parent_clone.merging_child = None;
+            parent_clone.index.remove(&child.lo).unwrap();
+            let cas_result = parent.cas(parent_clone, guard);
+            match cas_result {
+                Ok(new_parent) | Err(Some(new_parent)) => *parent = new_parent,
+                Err(None) => {
+                    /*
+                    println!(
+                        "returning early from merge_child because the parent \
+                        of the merged child has already been freed, indicating \
+                        that the merge already completed."
+                    );
+                    */
+                    return;
+                }
+            }
+        }
+
+        // 6. remove the child's pointer in the page table
+        if child
+            .slot
+            .compare_exchange(
+                child.ptr.as_ptr(),
+                std::ptr::null_mut(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            // only the thread that uninstalls this pointer gets to
+            // mark resources for reuse.
+            /*
+            println!(
+                "returning early from merge_child because we lost \
+                the race to remove the child pointer from the \
+                page table."
+            );
+            */
+            return;
+        }
+
+        // 7. defer putting the child's ID into the free stack
+        guard.defer_drop(Deferred::MarkIdReusable {
+            stack: free_ids.get_pusher(),
+            id: child.id,
+        });
+
+        // 8. defer the reclamation of the child node
+        let replaced: Box<Node<K, V>> = unsafe { Box::from_raw(child.ptr.as_ptr()) };
+        guard.defer_drop(Deferred::DropNode(replaced));
+
+        // println!("merge_child fully completed");
     }
 
     fn leaf_for_key<'a>(
@@ -385,62 +642,110 @@ where
         key: &K,
         idgen: &AtomicU64,
         free_ids: &mut ConcurrentStack<u64>,
-        guard: &mut Guard<'a, Box<Node<K, V>>>,
+        guard: &mut Guard<'a, Deferred<K, V>>,
     ) -> NodeView<'a, K, V> {
-        let root_id = self.root_id.load(Ordering::Acquire);
-
+        // println!("looking for key {key:?}");
         let mut parent_cursor_opt: Option<NodeView<'a, K, V>> = None;
-        let mut cursor = self.view_for_id(root_id, guard);
+        let mut cursor = self.root(guard);
+        let mut root_id = cursor.id;
 
-        const MAX_LOOPS: usize = 8;
+        macro_rules! reset {
+            ($reason:expr) => {
+                // println!("reset at {} due to {}", line!(), $reason);
+                parent_cursor_opt = None;
+                cursor = self.root(guard);
+                root_id = cursor.id;
+                continue;
+            };
+        }
+
         for i in 0.. {
             // println!("cursor is: {} -> {:?}", cursor.id, *cursor);
             if i >= MAX_LOOPS {
                 panic!("exceeded max loops");
             }
+
+            if let Some(merging_child_id) = cursor.merging_child {
+                let mut child = if let Some(view) = self.view_for_id(merging_child_id, guard) {
+                    view
+                } else {
+                    reset!("merging child of marked parent already freed");
+                };
+                self.merge_child(&mut cursor, &mut child, free_ids, guard);
+                reset!("cooperatively performed merge_child");
+            }
+
+            if cursor.should_merge() {
+                if let Some(ref mut parent_cursor) = parent_cursor_opt {
+                    let is_leftmost_child =
+                        parent_cursor.index.iter().next().unwrap().0 == &cursor.lo;
+
+                    if !is_leftmost_child {
+                        if let Ok(new_parent) =
+                            self.install_parent_merge(parent_cursor, &cursor, guard)
+                        {
+                            *parent_cursor = new_parent;
+                        } else {
+                            reset!("failed to install parent merge");
+                        }
+
+                        self.merge_child(parent_cursor, &mut cursor, free_ids, guard);
+                        reset!("completed merge_child");
+                    }
+                }
+            }
+
             assert!(key >= &*cursor.lo);
             if let Some(hi) = &cursor.hi {
                 if key >= hi {
                     // go right to the tree sibling
                     let next = cursor.next.unwrap();
-                    let rhs = self.view_for_id(next, guard);
+                    let rhs = if let Some(view) = self.view_for_id(next, guard) {
+                        view
+                    } else {
+                        // println!("right child {next} not found");
+                        reset!("right child already freed");
+                    };
 
                     if let Some(ref mut parent_cursor) = parent_cursor_opt {
-                        let mut parent_clone: Box<Node<K, V>> = Box::new((*parent_cursor).clone());
-                        assert!(!parent_clone.is_leaf);
-                        parent_clone.index.insert(rhs.lo.clone(), next);
+                        if parent_cursor.is_viable_parent_for(&rhs) {
+                            let mut parent_clone: Box<Node<K, V>> =
+                                Box::new((*parent_cursor).clone());
+                            assert!(!parent_clone.is_leaf);
+                            parent_clone.index.insert(rhs.lo.clone(), next);
 
-                        let mut rhs_id = None;
+                            let mut rhs_id = None;
 
-                        if parent_clone.should_split() {
-                            let new_id = free_ids
-                                .pop()
-                                .unwrap_or_else(|| idgen.fetch_add(1, Ordering::Relaxed));
+                            if parent_clone.should_split() {
+                                let new_id = free_ids
+                                    .pop()
+                                    .unwrap_or_else(|| idgen.fetch_add(1, Ordering::Relaxed));
 
-                            let (lhs, rhs) = parent_clone.split(new_id);
+                                let (lhs, rhs) = parent_clone.split(new_id);
 
-                            let rhs_ptr = Box::into_raw(Box::new(rhs));
+                                let rhs_ptr = Box::into_raw(Box::new(rhs));
 
-                            let atomic_ptr_ref = self.table.get(new_id);
+                                let atomic_ptr_ref = self.table.get(new_id);
 
-                            let prev = atomic_ptr_ref.swap(rhs_ptr, Ordering::Release);
+                                let prev = atomic_ptr_ref.swap(rhs_ptr, Ordering::Release);
 
-                            assert!(prev.is_null());
+                                assert!(prev.is_null());
 
-                            rhs_id = Some(new_id);
+                                rhs_id = Some(new_id);
 
-                            parent_clone = Box::new(lhs);
-                        };
+                                parent_clone = Box::new(lhs);
+                            };
 
-                        if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
-                            parent_cursor_opt = Some(new_parent_view);
-                        } else if let Some(new_id) = rhs_id {
-                            let atomic_ptr_ref = self.table.get(new_id);
+                            if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
+                                parent_cursor_opt = Some(new_parent_view);
+                            } else if let Some(new_id) = rhs_id {
+                                let atomic_ptr_ref = self.table.get(new_id);
 
-                            // clear dangling ptr (cas freed it already)
-                            let _rhs_ptr =
-                                atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
-                            free_ids.push(new_id);
+                                // clear dangling ptr (cas freed it already)
+                                let _rhs_ptr =
+                                    atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                                free_ids.push(new_id);
+                            }
                         }
                     } else {
                         // root hoist
@@ -475,6 +780,9 @@ where
                                 atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
                             let dangling_root = unsafe { Box::from_raw(root_ptr) };
                             drop(dangling_root);
+
+                            // it's safe to directly push this id into the free list because
+                            // it was never accessible via the atomic root marker.
                             free_ids.push(new_id);
                         }
                     }
@@ -491,7 +799,11 @@ where
             // go down the tree
             let child_id = *cursor.index.range::<K, _>(..=key).next_back().unwrap().1;
             parent_cursor_opt = Some(cursor);
-            cursor = self.view_for_id(child_id, guard);
+            cursor = if let Some(view) = self.view_for_id(child_id, guard) {
+                view
+            } else {
+                reset!("attempt to traverse to child failed because the child has been freed");
+            };
         }
         // println!("final leaf is: {:?}", *cursor);
 
@@ -502,12 +814,14 @@ where
 #[derive(Debug)]
 struct Node<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     lo: Arc<K>,
     hi: Option<Arc<K>>,
     next: Option<Id>,
+    merging_child: Option<Id>,
+    is_merging: bool,
     is_leaf: bool,
     leaf: BTreeMap<Arc<K>, Arc<V>>,
     index: BTreeMap<Arc<K>, Id>,
@@ -515,8 +829,8 @@ where
 
 impl<K, V> Clone for Node<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     fn clone(&self) -> Node<K, V> {
         Node {
@@ -526,14 +840,16 @@ where
             is_leaf: self.is_leaf,
             leaf: self.leaf.clone(),
             index: self.index.clone(),
+            merging_child: None,
+            is_merging: false,
         }
     }
 }
 
 impl<K, V> Node<K, V>
 where
-    K: 'static + std::fmt::Debug + Default + Ord + Send + Sync,
-    V: 'static + std::fmt::Debug + Send + Sync,
+    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
 {
     fn new_root(lo: Arc<K>) -> Box<Node<K, V>> {
         Box::new(Node {
@@ -543,6 +859,8 @@ where
             is_leaf: false,
             leaf: Default::default(),
             index: Default::default(),
+            merging_child: None,
+            is_merging: false,
         })
     }
 
@@ -554,6 +872,8 @@ where
             is_leaf: true,
             leaf: Default::default(),
             index: Default::default(),
+            merging_child: None,
+            is_merging: false,
         })
     }
 
@@ -569,7 +889,21 @@ where
         self.leaf.insert(key, value)
     }
 
+    fn should_merge(&self) -> bool {
+        if self.merging_child.is_some() || self.is_merging {
+            return false;
+        }
+        if self.is_leaf {
+            self.leaf.len() <= MERGE_SIZE
+        } else {
+            self.index.len() <= MERGE_SIZE
+        }
+    }
+
     fn should_split(&self) -> bool {
+        if self.merging_child.is_some() || self.is_merging {
+            return false;
+        }
         if self.is_leaf {
             self.leaf.len() >= SPLIT_SIZE
         } else {
@@ -604,11 +938,42 @@ where
             is_leaf: self.is_leaf,
             index: rhs_index,
             leaf: rhs_leaf,
+            merging_child: None,
+            is_merging: false,
         };
 
         assert_eq!(self.hi, Some(split_point));
 
         (self, rhs)
+    }
+
+    fn merge(&mut self, rhs: &NodeView<'_, K, V>) {
+        assert!(rhs.is_merging);
+        assert!(!self.is_merging);
+
+        self.hi = rhs.hi.clone();
+        self.next = rhs.next;
+
+        if self.is_leaf {
+            for (k, v) in &rhs.leaf {
+                let prev = self.leaf.insert(k.clone(), v.clone());
+                assert!(prev.is_none());
+            }
+        } else {
+            for (k, v) in &rhs.leaf {
+                let prev = self.leaf.insert(k.clone(), v.clone());
+                assert!(prev.is_none());
+            }
+        };
+    }
+
+    fn is_viable_parent_for(&self, possible_child: &NodeView<'_, K, V>) -> bool {
+        match (&self.hi, &possible_child.hi) {
+            (Some(_), None) => return false,
+            (Some(parent_hi), Some(child_hi)) if parent_hi < child_hi => return false,
+            _ => {}
+        }
+        self.lo <= possible_child.lo
     }
 }
 
@@ -633,4 +998,58 @@ fn basic_tree() {
             "failed to get key {i}"
         );
     }
+}
+
+#[test]
+fn concurrent_tree() {
+    let n = 128; // SPLIT_SIZE
+    let run = |mut tree: ConcurrentMap<u16, u16>,
+               barrier: std::sync::Arc<std::sync::Barrier>,
+               low_bit| {
+        barrier.wait();
+        for key in 0..n {
+            let i = (key << 1) | low_bit;
+            assert_eq!(tree.get(&i), None);
+            tree.insert(i, i);
+            assert_eq!(
+                tree.get(&i).map(|arc| *arc),
+                Some(i),
+                "failed to get key {i}"
+            );
+        }
+        for key in 0_u16..n {
+            let i = (key << 1) | low_bit;
+            assert_eq!(
+                tree.get(&i).map(|arc| *arc),
+                Some(i),
+                "failed to get key {i}"
+            );
+        }
+        for key in 0..n {
+            let i = (key << 1) | low_bit;
+            assert_eq!(tree.remove(&i).map(|arc| *arc), Some(i));
+        }
+        for key in 0..n {
+            let i = (key << 1) | low_bit;
+            assert_eq!(tree.get(&i).map(|arc| *arc), None, "failed to get key {i}");
+        }
+    };
+
+    let mut tree = ConcurrentMap::default();
+
+    std::thread::scope(|s| {
+        for _ in 0..1024 {
+            let tree_0 = tree.clone();
+            let tree_1 = tree.clone();
+
+            let barrier_0 = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let barrier_1 = barrier_0.clone();
+
+            let thread_0 = s.spawn(move || run(tree_0, barrier_0, 0));
+            let thread_1 = s.spawn(move || run(tree_1, barrier_1, 1));
+
+            thread_0.join();
+            thread_1.join();
+        }
+    });
 }

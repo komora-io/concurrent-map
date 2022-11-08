@@ -1,8 +1,8 @@
-mod stack;
 mod map;
+mod stack;
 
-pub use stack::ConcurrentStack;
 pub use map::ConcurrentMap;
+pub use stack::{ConcurrentStack, ConcurrentStackPusher};
 
 /*
 fn dynamic_is_copy<T: ?Sized>() -> bool {
