@@ -72,6 +72,10 @@ where
         // println!("nodeview:     {:?}", *self);
         // println!("current:      {:?}", **self);
         // println!("new:          {:?}", *replacement);
+        assert!(
+            !(replacement.hi.is_some() ^ replacement.next.is_some()),
+            "hi and next must both either be None or Some"
+        );
         let replacement_ptr = Box::into_raw(replacement);
 
         let res = self.slot.compare_exchange(
@@ -531,7 +535,13 @@ where
             };
 
         loop {
-            if child.hi.is_some() && left_sibling.hi >= child.hi {
+            if left_sibling.next.is_none() {
+                // the merge completed and the left sibling became the infinity node in the mean
+                // time
+                return;
+            }
+
+            if child.hi.is_some() && left_sibling.hi.is_some() && left_sibling.hi >= child.hi {
                 // step 4 happened concurrently
                 // println!("breaking from the left sibling install loop because left_sibling.hi ({:?}) >= child.hi ({:?})", left_sibling.hi, child.hi);
                 break;
@@ -583,6 +593,8 @@ where
         // 5. cas the parent to remove the merged child
         while parent.merging_child == Some(child.id) {
             let mut parent_clone: Box<Node<K, V>> = Box::new((*parent).clone());
+            assert!(parent_clone.merging_child.is_some());
+            assert!(parent_clone.index.contains_key(&child.lo));
             parent_clone.merging_child = None;
             parent_clone.index.remove(&child.lo).unwrap();
             let cas_result = parent.cas(parent_clone, guard);
@@ -672,7 +684,11 @@ where
                     reset!("merging child of marked parent already freed");
                 };
                 self.merge_child(&mut cursor, &mut child, free_ids, guard);
-                reset!("cooperatively performed merge_child");
+                reset!("cooperatively performed merge_child after detecting parent");
+            }
+
+            if cursor.is_merging {
+                reset!("resetting after detected child merging without corresponding parent child_merge");
             }
 
             if cursor.should_merge() {
@@ -840,8 +856,8 @@ where
             is_leaf: self.is_leaf,
             leaf: self.leaf.clone(),
             index: self.index.clone(),
-            merging_child: None,
-            is_merging: false,
+            merging_child: self.merging_child.clone(),
+            is_merging: self.is_merging.clone(),
         }
     }
 }
@@ -878,14 +894,24 @@ where
     }
 
     fn get(&self, key: &K) -> Option<Arc<V>> {
+        assert!(!self.is_merging);
+        assert!(self.merging_child.is_none());
+        assert!(self.is_leaf);
+
         self.leaf.get(key).cloned()
     }
 
     fn remove(&mut self, key: &K) -> Option<Arc<V>> {
+        assert!(!self.is_merging);
+        assert!(self.merging_child.is_none());
+
         self.leaf.remove(key)
     }
 
     fn insert(&mut self, key: Arc<K>, value: Arc<V>) -> Option<Arc<V>> {
+        assert!(!self.is_merging);
+        assert!(self.merging_child.is_none());
+
         self.leaf.insert(key, value)
     }
 
@@ -912,6 +938,9 @@ where
     }
 
     fn split(mut self, new_id: u64) -> (Node<K, V>, Node<K, V>) {
+        assert!(!self.is_merging);
+        assert!(self.merging_child.is_none());
+
         let split_idx = SPLIT_SIZE / 2;
 
         let (split_point, rhs_leaf, rhs_index) = if self.is_leaf {
@@ -1002,13 +1031,13 @@ fn basic_tree() {
 
 #[test]
 fn concurrent_tree() {
-    let n = 128; // SPLIT_SIZE
-    let run = |mut tree: ConcurrentMap<u16, u16>,
-               barrier: std::sync::Arc<std::sync::Barrier>,
-               low_bit| {
+    let n: u16 = 128;
+    let concurrency: u16 = 20;
+
+    let run = |mut tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bit| {
         barrier.wait();
         for key in 0..n {
-            let i = (key << 1) | low_bit;
+            let i = (key << concurrency.trailing_zeros()) | low_bit;
             assert_eq!(tree.get(&i), None);
             tree.insert(i, i);
             assert_eq!(
@@ -1018,7 +1047,7 @@ fn concurrent_tree() {
             );
         }
         for key in 0_u16..n {
-            let i = (key << 1) | low_bit;
+            let i = (key << concurrency.trailing_zeros()) | low_bit;
             assert_eq!(
                 tree.get(&i).map(|arc| *arc),
                 Some(i),
@@ -1026,11 +1055,11 @@ fn concurrent_tree() {
             );
         }
         for key in 0..n {
-            let i = (key << 1) | low_bit;
+            let i = (key << concurrency.trailing_zeros()) | low_bit;
             assert_eq!(tree.remove(&i).map(|arc| *arc), Some(i));
         }
         for key in 0..n {
-            let i = (key << 1) | low_bit;
+            let i = (key << concurrency.trailing_zeros()) | low_bit;
             assert_eq!(tree.get(&i).map(|arc| *arc), None, "failed to get key {i}");
         }
     };
@@ -1039,17 +1068,18 @@ fn concurrent_tree() {
 
     std::thread::scope(|s| {
         for _ in 0..1024 {
-            let tree_0 = tree.clone();
-            let tree_1 = tree.clone();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency as usize));
+            let mut threads = vec![];
+            for i in 0..concurrency {
+                let tree = tree.clone();
+                let barrier = barrier.clone();
 
-            let barrier_0 = std::sync::Arc::new(std::sync::Barrier::new(2));
-            let barrier_1 = barrier_0.clone();
-
-            let thread_0 = s.spawn(move || run(tree_0, barrier_0, 0));
-            let thread_1 = s.spawn(move || run(tree_1, barrier_1, 1));
-
-            thread_0.join();
-            thread_1.join();
+                let thread = s.spawn(move || run(tree, &barrier, i));
+                threads.push(thread);
+            }
+            for thread in threads.into_iter() {
+                thread.join().unwrap();
+            }
         }
     });
 }
