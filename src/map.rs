@@ -27,6 +27,15 @@ const MERGE_SIZE: usize = 3;
 
 type Id = u64;
 
+#[derive(Debug)]
+pub struct CasFailure<V> {
+    /// The current actual value that failed the comparison
+    pub actual: Option<Arc<V>>,
+    /// The value that was proposed as a new value, which could
+    /// not be installed due to the comparison failure.
+    pub returned_new_value: Option<Arc<V>>,
+}
+
 enum Deferred<K, V>
 where
     K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
@@ -203,7 +212,24 @@ impl Minimum for &str {
     }
 }
 
-/// A lock-free B+ tree.
+/// A 100% lock-free B+ tree.
+///
+/// One thing that might seem strange compared to other
+/// concurrent structures in the Rust ecosystem, is that
+/// all of the methods require a mutable self reference.
+/// This is intentional, and stems from the fact that each
+/// `ConcurrentMap` object holds a fully-owned local
+/// garbage bag for epoch-based reclamation, backed by
+/// the `ebr` crate. Epoch-based reclamation is at the heart
+/// of the concurrent Rust ecosystem, but existing popular
+/// implementations tend to incur significant overhead due
+/// to an over-reliance on shared state. This crate (and
+/// the backing `ebr` crate) takes a different approach.
+/// It may seem unfamiliar, but it allows for far higher
+/// efficiency, and this approach may become more prevalent
+/// over time as more people realize that this is how to
+/// make one of the core aspects underlying many of our
+/// concurrent data structures to be made more efficient.
 ///
 /// If you want to use a custom key type, you must
 /// implement the `concurrent_map::Minimum` trait,
@@ -317,6 +343,7 @@ where
     K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
+    /// Atomically get a value out of the tree that is associated with this key.
     pub fn get(&mut self, key: &K) -> Option<Arc<V>> {
         let mut guard = self.ebr.pin();
 
@@ -327,6 +354,7 @@ where
         leaf.get(key)
     }
 
+    /// Atomically insert a key-value pair into the tree, returning the previous value associated with this key if one existed.
     pub fn insert(&mut self, key: K, value: V) -> Option<Arc<V>> {
         let key_arc = Arc::new(key);
         let value_arc = Arc::new(value);
@@ -377,6 +405,7 @@ where
         }
     }
 
+    /// Atomically remove the value associated with this key from the tree, returning the previous value if one existed.
     pub fn remove(&mut self, key: &K) -> Option<Arc<V>> {
         loop {
             let mut guard = self.ebr.pin();
@@ -392,6 +421,75 @@ where
         }
     }
 
+    /// Atomically compare and swap the value associated with this key from the old value to the
+    /// new one. An old value of `None` means "only create this value if it does not already
+    /// exist". A new value of `None` means "delete this value, if it matches the provided old value".
+    /// If successful, returns the old value if it existed. If unsuccessful, returns the proposed
+    /// new value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// // key 1 does not yet exist
+    /// assert_eq!(tree.get(&1), None);
+    ///
+    /// // uniquely create value 10
+    /// tree.cas(1, None, Some(10)).unwrap();
+    ///
+    /// assert_eq!(*tree.get(&1).unwrap(), 10);
+    ///
+    /// // compare and swap from value 10 to value 20
+    /// tree.cas(1, Some(&10), Some(20)).unwrap();
+    ///
+    /// assert_eq!(*tree.get(&1).unwrap(), 20);
+    ///
+    /// // conditionally delete
+    /// tree.cas(1, Some(&20), None).unwrap();
+    ///
+    /// assert_eq!(tree.get(&1), None);
+    /// ```
+    pub fn cas<KArc: Into<Arc<K>>>(
+        &mut self,
+        key: KArc,
+        old: Option<&V>,
+        new: Option<V>,
+    ) -> Result<Option<Arc<V>>, CasFailure<V>>
+    where
+        V: PartialEq,
+    {
+        let key_arc: Arc<K> = key.into();
+        let value_arc: Option<Arc<V>> = new.map(Arc::new);
+        loop {
+            let mut guard = self.ebr.pin();
+            let leaf =
+                self.inner
+                    .leaf_for_key(&*key_arc, &self.idgen, &mut self.free_ids, &mut guard);
+            let mut leaf_clone: Box<Node<K, V>> = Box::new((*leaf).clone());
+            let ret = leaf_clone.cas(key_arc.clone(), old, value_arc.clone());
+            let install_attempt = leaf.cas(leaf_clone, &mut guard);
+            if install_attempt.is_ok() {
+                return ret;
+            }
+        }
+    }
+
+    /// Iterate over the tree.
+    ///
+    /// This is not an atomic snapshot, and it caches B+tree leaf
+    /// nodes as it iterates through them to achieve high throughput.
+    /// As a result, the following behaviors are possible:
+    ///
+    /// * may (or may not!) return values that were concurrently added to the tree after the
+    ///   iterator was created
+    /// * may (or may not!) return items that were concurrently deleted from the tree after
+    ///   the iterator was created
+    /// * If a key's value is changed from one value to another one after this iterator
+    ///   is created, this iterator might return the old or the new value.
+    ///
+    /// But, you can be certain that any key that existed prior to the creation of this
+    /// iterator, and was not changed during iteration, will be observed as expected.
     pub fn iter<'a>(&'a mut self) -> Iter<'a, K, V>
     where
         K: Clone,
@@ -413,6 +511,21 @@ where
         }
     }
 
+    /// Iterate over a range of the tree.
+    ///
+    /// This is not an atomic snapshot, and it caches B+tree leaf
+    /// nodes as it iterates through them to achieve high throughput.
+    /// As a result, the following behaviors are possible:
+    ///
+    /// * may (or may not!) return values that were concurrently added to the tree after the
+    ///   iterator was created
+    /// * may (or may not!) return items that were concurrently deleted from the tree after
+    ///   the iterator was created
+    /// * If a key's value is changed from one value to another one after this iterator
+    ///   is created, this iterator might return the old or the new value.
+    ///
+    /// But, you can be certain that any key that existed prior to the creation of this
+    /// iterator, and was not changed during iteration, will be observed as expected.
     pub fn range<'a, R: std::ops::RangeBounds<K>>(&'a mut self, range: R) -> Iter<'a, K, V, R> {
         let mut guard = self.ebr.pin();
 
@@ -1033,6 +1146,33 @@ where
         assert!(self.merging_child.is_none());
 
         self.leaf.insert(key, value)
+    }
+
+    pub fn cas(
+        &mut self,
+        key: Arc<K>,
+        old: Option<&V>,
+        new: Option<Arc<V>>,
+    ) -> Result<Option<Arc<V>>, CasFailure<V>>
+    where
+        V: PartialEq,
+    {
+        assert!(!self.is_merging);
+        assert!(self.merging_child.is_none());
+
+        match (old, self.leaf.get(&key)) {
+            (expected, actual) if expected == actual.map(|a| &**a) => {
+                if let Some(to_insert) = new {
+                    Ok(self.leaf.insert(key, to_insert))
+                } else {
+                    Ok(self.leaf.remove(&key))
+                }
+            }
+            (_, actual) => Err(CasFailure {
+                actual: actual.cloned(),
+                returned_new_value: new,
+            }),
+        }
     }
 
     fn should_merge(&self) -> bool {
