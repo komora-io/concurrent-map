@@ -215,10 +215,17 @@ where
     K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
+    // epoch-based reclamation
     ebr: Ebr<Deferred<K, V>>,
+    // new node id generator
     idgen: Arc<AtomicU64>,
-    inner: Arc<Inner<K, V>>,
+    // store freed node ids for reuse here
     free_ids: ConcurrentStack<u64>,
+    // the tree structure, separate from the other
+    // types so that we can mix mutable references
+    // to ebr with immutable references to other
+    // things.
+    inner: Arc<Inner<K, V>>,
 }
 
 impl<K, V> Default for ConcurrentMap<K, V>
@@ -385,112 +392,125 @@ where
         }
     }
 
-    fn iter(&mut self) -> Iter<'_, K, V>
+    pub fn iter<'a>(&'a mut self) -> Iter<'a, K, V>
     where
         K: Clone,
-    {
-        self.range::<K, _>(..)
-    }
-
-    fn range<'a, T: ?Sized, R>(&mut self, range: R) -> Iter<'_, K, V>
-    where
-        K: Clone,
-        R: 'static + std::ops::RangeBounds<K>,
     {
         let mut guard = self.ebr.pin();
 
-        let current = match range.start_bound() {
-            Bound::Included(t) => {
-                self.inner
-                    .leaf_for_key(t, &self.idgen, &mut self.free_ids, &mut guard)
-            }
-            Bound::Excluded(t) => {
-                self.inner
-                    .leaf_for_key(t, &self.idgen, &mut self.free_ids, &mut guard)
-            }
-            Bound::Unbounded => self.inner.leftmost_leaf(&mut guard),
-        };
+        let current =
+            self.inner
+                .leaf_for_key(&K::minimum(), &self.idgen, &mut self.free_ids, &mut guard);
 
         Iter {
             guard,
             inner: &self.inner,
-            lo: bound_map(range.start_bound()),
-            hi: bound_map(range.end_bound()),
+            idgen: &self.idgen,
+            free_ids: &mut self.free_ids,
             current,
+            range: std::ops::RangeFull,
+            previous: None,
+        }
+    }
+
+    pub fn range<'a, R: std::ops::RangeBounds<K>>(&'a mut self, range: R) -> Iter<'a, K, V, R> {
+        let mut guard = self.ebr.pin();
+
+        let mut min = None;
+        let start = match range.start_bound() {
+            std::ops::Bound::Unbounded => {
+                min = Some(K::minimum());
+                min.as_ref().unwrap()
+            }
+            std::ops::Bound::Included(k) | std::ops::Bound::Excluded(k) => k,
+        };
+
+        let current = self
+            .inner
+            .leaf_for_key(start, &self.idgen, &mut self.free_ids, &mut guard);
+
+        Iter {
+            guard,
+            inner: &self.inner,
+            idgen: &self.idgen,
+            free_ids: &mut self.free_ids,
+            current,
+            previous: None,
+            range,
         }
     }
 }
 
-fn bound_map<T, K>(bound: Bound<T>) -> Bound<Arc<K>>
-where
-    K: Clone,
-    T: std::borrow::Borrow<K> + Ord,
-{
-    match bound {
-        Bound::Included(t) => Bound::Included(t.borrow().clone().into()),
-        Bound::Excluded(t) => Bound::Excluded(t.borrow().clone().into()),
-        Bound::Unbounded => Bound::Unbounded,
-    }
-}
-
-struct Iter<'a, K, V>
+pub struct Iter<'a, K, V, R = std::ops::RangeFull>
 where
     K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
+    R: std::ops::RangeBounds<K>,
 {
     inner: &'a Inner<K, V>,
+    idgen: &'a AtomicU64,
+    free_ids: &'a mut ConcurrentStack<u64>,
     guard: Guard<'a, Deferred<K, V>>,
-    lo: Bound<Arc<K>>,
-    hi: Bound<Arc<K>>,
+    range: R,
+    previous: Option<Arc<K>>,
     current: NodeView<'a, K, V>,
 }
 
-impl<'a, K, V> Iterator for Iter<'a, K, V>
+impl<'a, K, V, R> Iter<'a, K, V, R>
 where
     K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
-    Bound<Arc<K>>: PartialOrd,
     V: 'static + fmt::Debug + Send + Sync,
+    R: std::ops::RangeBounds<K>,
+{
+    fn next_bound(&self) -> std::ops::Bound<&K> {
+        if let Some(ref previous) = self.previous {
+            std::ops::Bound::Excluded(&previous)
+        } else {
+            self.range.start_bound()
+        }
+    }
+}
+
+impl<'a, K, V, R> Iterator for Iter<'a, K, V, R>
+where
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Send + Sync,
+    R: std::ops::RangeBounds<K>,
 {
     type Item = (Arc<K>, Arc<V>);
+
     fn next(&mut self) -> Option<Self::Item> {
-        /*
-                if Bound::Included(self.current.lo.clone()) > self.hi {
+        loop {
+            let next_bound = self.next_bound();
+            let range: (std::ops::Bound<&K>, std::ops::Bound<&K>) =
+                (next_bound, std::ops::Bound::Unbounded);
+
+            if let Some((k, v)) = self.current.leaf.range::<K, _>(range).next() {
+                if self.range.contains(k) {
+                    self.previous = Some(k.clone());
+                    return Some((k.clone(), v.clone()));
+                } else {
                     return None;
                 }
-                let mut iter = self.current.leaf.range((&self.lo, &self.hi));
-                iter.next().map(|(k, v)| (k.clone(), v.clone()))
-        */
-        todo!()
+            } else if let Some(next_id) = self.current.next {
+                if let Some(next_view) = self.inner.view_for_id(next_id, &mut self.guard) {
+                    self.current = next_view;
+                } else if let Some(ref hi) = self.current.hi {
+                    self.current = self.inner.leaf_for_key(
+                        &hi,
+                        &self.idgen,
+                        &mut self.free_ids,
+                        &mut self.guard,
+                    );
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
     }
 }
-
-/*
-impl<'a, K, V> IntoIterator for &'a mut ConcurrentMap<K, V>
-where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    Bound<Arc<K>>: PartialOrd,
-    V: 'static + fmt::Debug + Send + Sync,
-{
-    type Item = (Arc<K>, Arc<V>);
-    type IntoIter = Iter<'a, K, V>;
-
-    fn into_iter(self) -> Iter<'a, K, V> {
-        self.iter()
-    }
-}
-*/
-
-/*
-impl<K, V> fmt::Debug for Inner<K, V>
-where
-    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + fmt::Debug + Send + Sync,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Inner").finish()
-    }
-}
-*/
 
 impl<K, V> Inner<K, V>
 where
@@ -1108,7 +1128,7 @@ where
 
 #[test]
 fn basic_tree() {
-    let mut tree = ConcurrentMap::default();
+    let mut tree = ConcurrentMap::<usize, usize>::default();
 
     let n = 64; // SPLIT_SIZE
     for i in 0..n {
@@ -1120,6 +1140,27 @@ fn basic_tree() {
             "failed to get key {i}"
         );
     }
+
+    for (i, (k, v)) in tree.range(..).enumerate() {
+        assert_eq!(i, *k);
+    }
+
+    for (i, (k, v)) in tree.iter().enumerate() {
+        assert_eq!(i, *k);
+    }
+
+    for (i, (k, v)) in tree.range(0..).enumerate() {
+        assert_eq!(i, *k);
+    }
+
+    for (i, (k, v)) in tree.range(0..n).enumerate() {
+        assert_eq!(i, *k);
+    }
+
+    for (i, (k, v)) in tree.range(0..=n).enumerate() {
+        assert_eq!(i, *k);
+    }
+
     for i in 0..n {
         assert_eq!(
             tree.get(&i).map(|arc| *arc),
@@ -1132,7 +1173,7 @@ fn basic_tree() {
 #[test]
 fn concurrent_tree() {
     let n: u16 = 1024;
-    let concurrency: u16 = 32;
+    let concurrency: u16 = 8;
 
     let run = |mut tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bits| {
         let shift = concurrency.next_power_of_two().trailing_zeros();
@@ -1157,6 +1198,18 @@ fn concurrent_tree() {
                 "failed to get key {i}"
             );
         }
+        let visible: std::collections::HashMap<u16, u16> =
+            tree.iter().map(|(k, v)| (*k, *v)).collect();
+
+        for key in 0_u16..n {
+            let i = unique_key(key);
+            assert_eq!(
+                visible.get(&i).map(|arc| *arc),
+                Some(i),
+                "failed to get key {i}"
+            );
+        }
+
         for key in 0..n {
             let i = unique_key(key);
             assert_eq!(tree.remove(&i).map(|arc| *arc), Some(i));

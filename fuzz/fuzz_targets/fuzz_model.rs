@@ -6,25 +6,30 @@ extern crate concurrent_map;
 
 use arbitrary::Arbitrary;
 
-const KEYSPACE: u64 = 255;
+const KEYSPACE: u64 = 32;
 
 #[derive(Debug)]
 enum Op {
     Insert { key: u64, value: u64 },
     Remove { key: u64 },
+    Range { start: u64, end: u64 },
 }
 
 impl<'a> Arbitrary<'a> for Op {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(if bool::arbitrary(u).unwrap_or(true) {
+        Ok(if u.ratio(1, 2).unwrap_or(true) {
             Op::Insert {
                 key: u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0),
                 value: u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0),
             }
-        } else {
+        } else if u.ratio(3, 4).unwrap_or(false) {
             Op::Remove {
                 key: u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0),
             }
+        } else {
+            let start = u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0);
+            let end = (start + 1).max(u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0));
+            Op::Range { start, end }
         })
     }
 }
@@ -44,6 +49,17 @@ fuzz_target!(|ops: Vec<Op>| {
             Op::Remove { key } => {
                 assert_eq!(tree.remove(&key).map(|arc| *arc), model.remove(&key));
             }
+            Op::Range { start, end } => {
+                let mut model_iter = model.range(start..end);
+                let mut tree_iter = tree.range(start..end);
+
+                for (k1, v1) in &mut model_iter {
+                    let (k2, v2) = tree_iter.next().unwrap();
+                    assert_eq!((k1, v1), (&*k2, &*v2));
+                }
+
+                assert_eq!(tree_iter.next(), None);
+            }
         };
 
         for (key, value) in &model {
@@ -56,4 +72,14 @@ fuzz_target!(|ops: Vec<Op>| {
         }
         */
     }
+
+    let mut model_iter = model.iter();
+    let mut tree_iter = tree.iter();
+
+    for (k1, v1) in &mut model_iter {
+        let (k2, v2) = tree_iter.next().unwrap();
+        assert_eq!((k1, v1), (&*k2, &*v2));
+    }
+
+    assert_eq!(tree_iter.next(), None);
 });
