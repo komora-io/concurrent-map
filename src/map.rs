@@ -13,11 +13,17 @@ use pagetable::PageTable;
 
 use crate::{ConcurrentStack, ConcurrentStackPusher};
 
-// TODO make this much much much larger
-const MAX_LOOPS: usize = 1024 * 1024;
+#[cfg(test)]
+const SPLIT_SIZE: usize = 4;
 
-const SPLIT_SIZE: usize = 8;
-const MERGE_SIZE: usize = 2;
+#[cfg(test)]
+const MERGE_SIZE: usize = 1;
+
+#[cfg(not(test))]
+const SPLIT_SIZE: usize = 16;
+
+#[cfg(not(test))]
+const MERGE_SIZE: usize = 3;
 
 type Id = u64;
 
@@ -559,7 +565,15 @@ where
             return Err(());
         }
 
-        assert!(parent.merging_child.is_none());
+        if !parent.index.contains_key(&child.lo) {
+            // can't install a parent merge if the child is unknown to the parent.
+            return Err(());
+        }
+
+        if parent.merging_child.is_some() {
+            // there is already a merge in-progress for a different child.
+            return Err(());
+        }
 
         let mut parent_clone: Box<Node<K, V>> = Box::new((*parent).clone());
         parent_clone.merging_child = Some(child.id);
@@ -673,10 +687,13 @@ where
         // 5. cas the parent to remove the merged child
         while parent.merging_child == Some(child.id) {
             let mut parent_clone: Box<Node<K, V>> = Box::new((*parent).clone());
+
             assert!(parent_clone.merging_child.is_some());
             assert!(parent_clone.index.contains_key(&child.lo));
+
             parent_clone.merging_child = None;
             parent_clone.index.remove(&child.lo).unwrap();
+
             let cas_result = parent.cas(parent_clone, guard);
             match cas_result {
                 Ok(new_parent) | Err(Some(new_parent)) => *parent = new_parent,
@@ -751,12 +768,8 @@ where
             };
         }
 
-        for i in 0.. {
+        loop {
             // println!("cursor is: {} -> {:?}", cursor.id, *cursor);
-            if i >= MAX_LOOPS {
-                panic!("exceeded max loops");
-            }
-
             if let Some(merging_child_id) = cursor.merging_child {
                 let mut child = if let Some(view) = self.view_for_id(merging_child_id, guard) {
                     view
@@ -1118,13 +1131,16 @@ fn basic_tree() {
 
 #[test]
 fn concurrent_tree() {
-    let n: u16 = 128;
-    let concurrency: u16 = 20;
+    let n: u16 = 1024;
+    let concurrency: u16 = 32;
 
-    let run = |mut tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bit| {
+    let run = |mut tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bits| {
+        let shift = concurrency.next_power_of_two().trailing_zeros();
+        let unique_key = |key| (key << shift) | low_bits;
+
         barrier.wait();
         for key in 0..n {
-            let i = (key << concurrency.trailing_zeros()) | low_bit;
+            let i = unique_key(key);
             assert_eq!(tree.get(&i), None);
             tree.insert(i, i);
             assert_eq!(
@@ -1134,7 +1150,7 @@ fn concurrent_tree() {
             );
         }
         for key in 0_u16..n {
-            let i = (key << concurrency.trailing_zeros()) | low_bit;
+            let i = unique_key(key);
             assert_eq!(
                 tree.get(&i).map(|arc| *arc),
                 Some(i),
@@ -1142,19 +1158,20 @@ fn concurrent_tree() {
             );
         }
         for key in 0..n {
-            let i = (key << concurrency.trailing_zeros()) | low_bit;
+            let i = unique_key(key);
             assert_eq!(tree.remove(&i).map(|arc| *arc), Some(i));
         }
         for key in 0..n {
-            let i = (key << concurrency.trailing_zeros()) | low_bit;
+            let i = unique_key(key);
             assert_eq!(tree.get(&i).map(|arc| *arc), None, "failed to get key {i}");
         }
+        println!("done");
     };
 
     let mut tree = ConcurrentMap::default();
 
     std::thread::scope(|s| {
-        for _ in 0..1024 {
+        for _ in 0..64 {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency as usize));
             let mut threads = vec![];
             for i in 0..concurrency {
