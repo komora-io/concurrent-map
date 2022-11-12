@@ -4,6 +4,5 @@
 
 Lock-free linearizable map.
 
-* `get`, `insert`, `cas`, `remove`
+* `get`, `insert`, `cas`, `remove`, `iter`, `range`
 * fully lock-free node splits and merges based on [sled](https://sled.rs) battle-tested implementation
-* `Iterator` support upcoming
