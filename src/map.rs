@@ -23,7 +23,7 @@ type Id = u64;
 
 enum Deferred<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     DropNode(Box<Node<K, V>>),
@@ -35,7 +35,7 @@ where
 
 impl<K, V> Drop for Deferred<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     fn drop(&mut self) {
@@ -48,7 +48,7 @@ where
 #[derive(Debug)]
 struct NodeView<'a, K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     ptr: NonNull<Node<K, V>>,
@@ -58,7 +58,7 @@ where
 
 impl<'a, K, V> NodeView<'a, K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     /// Try to replace. If the node has been deleted since we got our view,
@@ -115,7 +115,7 @@ where
 
 impl<'a, K, V> Deref for NodeView<'a, K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     type Target = Node<K, V>;
@@ -125,10 +125,88 @@ where
     }
 }
 
+/// This trait should be implemented for anything you wish to use
+/// as a key in the `ConcurrentMap`.
+pub trait Minimum {
+    fn minimum() -> Self;
+}
+
+macro_rules! impl_min {
+    ($($t:ty),+) => {
+        $(
+            impl Minimum for $t {
+                #[inline]
+                fn minimum() -> Self {
+                    <$t>::MIN
+                }
+            }
+        )*
+    }
+}
+
+impl_min!(usize, u8, u16, u32, u64, u128, isize, i8, i16, i32, i64, i128);
+
+macro_rules! impl_collection_default {
+    ($($t:ty),+) => {
+        $(
+            impl<T> Minimum for $t {
+                #[inline]
+                fn minimum() -> Self {
+                    <$t>::default()
+                }
+            }
+        )*
+    }
+}
+
+impl_collection_default!(
+    Vec<T>,
+    std::collections::VecDeque<T>,
+    std::collections::HashSet<T>,
+    std::collections::BTreeSet<T>,
+    std::collections::LinkedList<T>
+);
+
+impl<T> Minimum for &[T] {
+    fn minimum() -> Self {
+        &[]
+    }
+}
+
+impl<T: Minimum, const LEN: usize> Minimum for [T; LEN] {
+    fn minimum() -> Self {
+        core::array::from_fn(|_i| T::minimum())
+    }
+}
+
+impl<T: Minimum> Minimum for Box<T> {
+    fn minimum() -> Self {
+        Box::new(T::minimum())
+    }
+}
+
+impl Minimum for String {
+    fn minimum() -> Self {
+        String::new()
+    }
+}
+
+impl Minimum for &str {
+    fn minimum() -> Self {
+        ""
+    }
+}
+
+/// A lock-free B+ tree.
+///
+/// If you want to use a custom key type, you must
+/// implement the `concurrent_map::Minimum` trait,
+/// allowing the left-most side of the tree to be
+/// created before inserting any data.
 #[derive(Clone)]
 pub struct ConcurrentMap<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     ebr: Ebr<Deferred<K, V>>,
@@ -139,7 +217,7 @@ where
 
 impl<K, V> Default for ConcurrentMap<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     fn default() -> ConcurrentMap<K, V> {
@@ -148,9 +226,11 @@ where
 
         let table = PageTable::<AtomicPtr<Node<K, V>>>::default();
 
-        let mut root_node = Node::<K, V>::new_root(Arc::default());
-        root_node.index.insert(Arc::default(), initial_leaf_id);
-        let leaf_node = Node::<K, V>::new_leaf(Arc::default());
+        let mut root_node = Node::<K, V>::new_root();
+        root_node
+            .index
+            .insert(root_node.lo.clone(), initial_leaf_id);
+        let leaf_node = Node::<K, V>::new_leaf(root_node.lo.clone());
 
         let root_ptr = Box::into_raw(root_node);
         let leaf_ptr = Box::into_raw(leaf_node);
@@ -178,7 +258,7 @@ where
 #[derive(Default)]
 pub struct Inner<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     root_id: AtomicU64,
@@ -187,7 +267,7 @@ where
 
 impl<K, V> Drop for Inner<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     fn drop(&mut self) {
@@ -221,7 +301,7 @@ where
 
 impl<K, V> ConcurrentMap<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     pub fn get(&mut self, key: &K) -> Option<Arc<V>> {
@@ -349,7 +429,7 @@ where
 
 struct Iter<'a, K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     inner: &'a Inner<K, V>,
@@ -361,7 +441,7 @@ where
 
 impl<'a, K, V> Iterator for Iter<'a, K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     Bound<Arc<K>>: PartialOrd,
     V: 'static + fmt::Debug + Send + Sync,
 {
@@ -381,7 +461,7 @@ where
 /*
 impl<'a, K, V> IntoIterator for &'a mut ConcurrentMap<K, V>
 where
-    K: 'static + Clone + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     Bound<Arc<K>>: PartialOrd,
     V: 'static + fmt::Debug + Send + Sync,
 {
@@ -397,7 +477,7 @@ where
 /*
 impl<K, V> fmt::Debug for Inner<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -408,7 +488,7 @@ where
 
 impl<K, V> Inner<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     fn view_for_id<'a>(
@@ -769,7 +849,7 @@ where
                             .pop()
                             .unwrap_or_else(|| idgen.fetch_add(1, Ordering::Relaxed));
 
-                        let mut new_root_node = Node::<K, V>::new_root(Arc::default());
+                        let mut new_root_node = Node::<K, V>::new_root();
                         new_root_node.index.insert(cursor.lo.clone(), root_id);
                         new_root_node.index.insert(rhs.lo.clone(), next);
                         let new_root_ptr = Box::into_raw(new_root_node);
@@ -809,6 +889,12 @@ where
             }
 
             if cursor.is_leaf {
+                assert!(!cursor.is_merging);
+                assert!(cursor.merging_child.is_none());
+                assert!(&*cursor.lo <= &*key);
+                if let Some(ref hi) = cursor.hi {
+                    assert!(&**hi > &*key);
+                }
                 break;
             }
 
@@ -830,7 +916,7 @@ where
 #[derive(Debug)]
 struct Node<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     lo: Arc<K>,
@@ -845,7 +931,7 @@ where
 
 impl<K, V> Clone for Node<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
     fn clone(&self) -> Node<K, V> {
@@ -864,12 +950,13 @@ where
 
 impl<K, V> Node<K, V>
 where
-    K: 'static + fmt::Debug + Default + Ord + Send + Sync,
+    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
 {
-    fn new_root(lo: Arc<K>) -> Box<Node<K, V>> {
+    fn new_root() -> Box<Node<K, V>> {
+        let min_key = Arc::new(K::minimum());
         Box::new(Node {
-            lo,
+            lo: min_key,
             hi: None,
             next: None,
             is_leaf: false,
