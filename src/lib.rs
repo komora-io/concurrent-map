@@ -245,7 +245,7 @@ impl Minimum for &str {
 /// concurrent data structures to be made more efficient.
 ///
 /// If you want to use a custom key type, you must
-/// implement the [`concurrent_map::Minimum`] trait,
+/// implement the [`Minimum`] trait,
 /// allowing the left-most side of the tree to be
 /// created before inserting any data.
 #[derive(Clone)]
@@ -1370,7 +1370,7 @@ fn basic_tree() {
 fn timing_tree() {
     use std::time::Instant;
 
-    let mut tree = ConcurrentMap::<usize, usize>::default();
+    let mut tree = ConcurrentMap::<u64, u64>::default();
 
     let n = 1024 * 1024;
 
@@ -1378,19 +1378,32 @@ fn timing_tree() {
     for i in 0..n {
         tree.insert(i, i);
     }
-    dbg!(insert.elapsed());
+    let insert_elapsed = insert.elapsed();
+    println!(
+        "{} inserts/s, total {:?}",
+        (n * 1000) / insert_elapsed.as_millis() as u64,
+        insert_elapsed
+    );
 
     let scan = Instant::now();
-    for (i, (k, _v)) in tree.range(..).enumerate() {
-        assert_eq!(i, *k);
-    }
-    dbg!(scan.elapsed());
+    for _ in tree.range(..) {}
+    let scan_elapsed = scan.elapsed();
+    println!(
+        "{} scanned items/s, total {:?}",
+        (n * 1000) / scan_elapsed.as_millis() as u64,
+        scan_elapsed
+    );
 
     let gets = Instant::now();
     for i in 0..n {
         tree.get(&i);
     }
-    dbg!(gets.elapsed());
+    let gets_elapsed = gets.elapsed();
+    println!(
+        "{} gets/s, total {:?}",
+        (n * 1000) / gets_elapsed.as_millis() as u64,
+        gets_elapsed
+    );
 }
 
 #[test]
