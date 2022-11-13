@@ -1,6 +1,6 @@
 mod stack;
 
-pub use stack::{ConcurrentStack, ConcurrentStackPusher};
+use stack::{ConcurrentStack, ConcurrentStackPusher};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -28,7 +28,8 @@ const MERGE_SIZE: usize = 3;
 
 type Id = u64;
 
-#[derive(Debug)]
+/// Error type for the [`ConcurrentMap::cas`] operation.
+#[derive(Debug, PartialEq, Eq)]
 pub struct CasFailure<V> {
     /// The current actual value that failed the comparison
     pub actual: Option<Arc<V>>,
@@ -142,7 +143,7 @@ where
 }
 
 /// This trait should be implemented for anything you wish to use
-/// as a key in the `ConcurrentMap`.
+/// as a key in the [`ConcurrentMap`].
 pub trait Minimum {
     fn minimum() -> Self;
 }
@@ -213,19 +214,19 @@ impl Minimum for &str {
     }
 }
 
-/// A 100% lock-free B+ tree.
+/// A lock-free B+ tree.
 ///
 /// One thing that might seem strange compared to other
 /// concurrent structures in the Rust ecosystem, is that
 /// all of the methods require a mutable self reference.
 /// This is intentional, and stems from the fact that each
-/// `ConcurrentMap` object holds a fully-owned local
+/// [`ConcurrentMap`] object holds a fully-owned local
 /// garbage bag for epoch-based reclamation, backed by
-/// the `ebr` crate. Epoch-based reclamation is at the heart
+/// the [`ebr`] crate. Epoch-based reclamation is at the heart
 /// of the concurrent Rust ecosystem, but existing popular
 /// implementations tend to incur significant overhead due
 /// to an over-reliance on shared state. This crate (and
-/// the backing `ebr` crate) takes a different approach.
+/// the backing [`ebr`] crate) takes a different approach.
 /// It may seem unfamiliar, but it allows for far higher
 /// efficiency, and this approach may become more prevalent
 /// over time as more people realize that this is how to
@@ -233,7 +234,7 @@ impl Minimum for &str {
 /// concurrent data structures to be made more efficient.
 ///
 /// If you want to use a custom key type, you must
-/// implement the `concurrent_map::Minimum` trait,
+/// implement the [`concurrent_map::Minimum`] trait,
 /// allowing the left-most side of the tree to be
 /// created before inserting any data.
 #[derive(Clone)]
@@ -296,7 +297,7 @@ where
 }
 
 #[derive(Default)]
-pub struct Inner<K, V>
+struct Inner<K, V>
 where
     K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + fmt::Debug + Send + Sync,
@@ -429,6 +430,7 @@ where
     /// # Examples
     ///
     /// ```
+    /// # use std::sync::Arc;
     /// let mut tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
     /// // key 1 does not yet exist
@@ -443,6 +445,20 @@ where
     /// tree.cas(1, Some(&10), Some(20)).unwrap();
     ///
     /// assert_eq!(*tree.get(&1).unwrap(), 20);
+    ///
+    /// // if we guess the wrong current value, a CasFailure is returned
+    /// // which will tell us what the actual current value is (which we
+    /// // failed to provide) and it will give us back our proposed new
+    /// // value (although it will be hoisted into an Arc, if it was not
+    /// // already inside one).
+    /// let cas_result = tree.cas(1, Some(&999999), Some(30));
+    ///
+    /// let expected_cas_failure = Err(concurrent_map::CasFailure {
+    ///     actual: Some(Arc::new(20)),
+    ///     returned_new_value: Some(Arc::new(30)),
+    /// });
+    ///
+    /// assert_eq!(cas_result, expected_cas_failure);
     ///
     /// // conditionally delete
     /// tree.cas(1, Some(&20), None).unwrap();
@@ -554,6 +570,7 @@ where
     }
 }
 
+/// An iterator over a [`ConcurrentMap`].
 pub struct Iter<'a, K, V, R = std::ops::RangeFull>
 where
     K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
