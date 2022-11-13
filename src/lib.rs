@@ -600,10 +600,7 @@ where
     ///
     /// But, you can be certain that any key that existed prior to the creation of this
     /// iterator, and was not changed during iteration, will be observed as expected.
-    pub fn iter(&mut self) -> Iter<'_, K, V>
-    where
-        K: Clone,
-    {
+    pub fn iter(&mut self) -> Iter<'_, K, V> {
         let mut guard = self.ebr.pin();
 
         let current =
