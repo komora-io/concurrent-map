@@ -11,6 +11,9 @@ use std::sync::{
     Arc,
 };
 
+#[cfg(feature = "timing")]
+use std::time::{Duration, Instant};
+
 use ebr::{Ebr, Guard};
 use pagetable::PageTable;
 
@@ -293,7 +296,14 @@ where
 
         let root_id = initial_root_id.into();
 
-        let inner = Arc::new(Inner { root_id, table });
+        let inner = Arc::new(Inner {
+            root_id,
+            table,
+            #[cfg(feature = "timing")]
+            slowest_op: u64::MIN.into(),
+            #[cfg(feature = "timing")]
+            fastest_op: u64::MAX.into(),
+        });
 
         ConcurrentMap {
             ebr: Ebr::default(),
@@ -312,6 +322,10 @@ where
 {
     root_id: AtomicU64,
     table: PageTable<AtomicPtr<Node<K, V>>>,
+    #[cfg(feature = "timing")]
+    slowest_op: AtomicU64,
+    #[cfg(feature = "timing")]
+    fastest_op: AtomicU64,
 }
 
 impl<K, V> Drop for Inner<K, V>
@@ -320,6 +334,9 @@ where
     V: 'static + fmt::Debug + Send + Sync,
 {
     fn drop(&mut self) {
+        #[cfg(feature = "timing")]
+        self.print_timing();
+
         let mut ebr = Ebr::default();
         let mut guard = ebr.pin();
 
@@ -886,6 +903,32 @@ where
         // println!("merge_child fully completed");
     }
 
+    #[cfg(feature = "timing")]
+    fn print_timing(&self) {
+        println!(
+            "min : {:?}",
+            Duration::from_nanos(self.fastest_op.load(Ordering::Acquire))
+        );
+        println!(
+            "max : {:?}",
+            Duration::from_nanos(self.slowest_op.load(Ordering::Acquire))
+        );
+    }
+
+    #[cfg(feature = "timing")]
+    fn record_timing(&self, time: Duration) {
+        let nanos = time.as_nanos() as u64;
+        let min = self.fastest_op.load(Ordering::Relaxed);
+        if nanos < min {
+            self.fastest_op.fetch_min(nanos, Ordering::Relaxed);
+        }
+
+        let max = self.slowest_op.load(Ordering::Relaxed);
+        if nanos > max {
+            self.slowest_op.fetch_max(nanos, Ordering::Relaxed);
+        }
+    }
+
     fn leaf_for_key<'a>(
         &'a self,
         key: &K,
@@ -907,6 +950,9 @@ where
                 continue;
             };
         }
+
+        #[cfg(feature = "timing")]
+        let before = Instant::now();
 
         loop {
             // println!("cursor is: {} -> {:?}", cursor.id, *cursor);
@@ -1061,6 +1107,9 @@ where
             };
         }
         // println!("final leaf is: {:?}", *cursor);
+
+        #[cfg(feature = "timing")]
+        self.record_timing(before.elapsed());
 
         cursor
     }
@@ -1318,6 +1367,33 @@ fn basic_tree() {
 }
 
 #[test]
+fn timing_tree() {
+    use std::time::Instant;
+
+    let mut tree = ConcurrentMap::<usize, usize>::default();
+
+    let n = 1024 * 1024;
+
+    let insert = Instant::now();
+    for i in 0..n {
+        tree.insert(i, i);
+    }
+    dbg!(insert.elapsed());
+
+    let scan = Instant::now();
+    for (i, (k, _v)) in tree.range(..).enumerate() {
+        assert_eq!(i, *k);
+    }
+    dbg!(scan.elapsed());
+
+    let gets = Instant::now();
+    for i in 0..n {
+        tree.get(&i);
+    }
+    dbg!(gets.elapsed());
+}
+
+#[test]
 fn concurrent_tree() {
     let n: u16 = 1024;
     let concurrency: u16 = 8;
@@ -1365,7 +1441,6 @@ fn concurrent_tree() {
             let i = unique_key(key);
             assert_eq!(tree.get(&i).map(|arc| *arc), None, "failed to get key {i}");
         }
-        println!("done");
     };
 
     let tree = ConcurrentMap::default();
