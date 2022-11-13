@@ -73,11 +73,13 @@
         clippy::wildcard_enum_match_arm,
     )
 )]
+
+mod array_map;
 mod stack;
 
+use array_map::ArrayMap;
 use stack::{Pusher, Stack};
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -92,16 +94,16 @@ use std::time::{Duration, Instant};
 use ebr::{Ebr, Guard};
 use pagetable::PageTable;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz_constants"))]
 const SPLIT_SIZE: usize = 4;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz_constants"))]
 const MERGE_SIZE: usize = 1;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "fuzz_constants")))]
 const SPLIT_SIZE: usize = 16;
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "fuzz_constants")))]
 const MERGE_SIZE: usize = 3;
 
 type Id = u64;
@@ -418,7 +420,7 @@ where
             if cursor.is_leaf {
                 break;
             }
-            let child_id = *cursor.index.iter().next().unwrap().1;
+            let child_id = cursor.index.iter().next().unwrap().1;
 
             cursor = self.view_for_id(child_id, &mut guard).unwrap();
         }
@@ -614,7 +616,7 @@ where
             free_ids: &mut self.free_ids,
             current,
             range: std::ops::RangeFull,
-            previous: None,
+            next_index: 0,
         }
     }
 
@@ -650,14 +652,20 @@ where
             .inner
             .leaf_for_key(start, &self.idgen, &mut self.free_ids, &mut guard);
 
+        let next_index = current
+            .leaf
+            .iter()
+            .position(|(k, _v)| range.contains(k))
+            .unwrap_or(0);
+
         Iter {
             guard,
             inner: &self.inner,
             idgen: &self.idgen,
             free_ids: &mut self.free_ids,
             current,
-            previous: None,
             range,
+            next_index,
         }
     }
 }
@@ -674,23 +682,8 @@ where
     free_ids: &'a mut Stack<u64>,
     guard: Guard<'a, Deferred<K, V>>,
     range: R,
-    previous: Option<Arc<K>>,
     current: NodeView<'a, K, V>,
-}
-
-impl<'a, K, V, R> Iter<'a, K, V, R>
-where
-    K: 'static + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + fmt::Debug + Send + Sync,
-    R: std::ops::RangeBounds<K>,
-{
-    fn next_bound(&self) -> std::ops::Bound<&K> {
-        if let Some(ref previous) = self.previous {
-            std::ops::Bound::Excluded(previous)
-        } else {
-            self.range.start_bound()
-        }
-    }
+    next_index: usize,
 }
 
 impl<'a, K, V, R> Iterator for Iter<'a, K, V, R>
@@ -703,28 +696,39 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let next_bound = self.next_bound();
-            let range: (std::ops::Bound<&K>, std::ops::Bound<&K>) =
-                (next_bound, std::ops::Bound::Unbounded);
-
-            if let Some((k, v)) = self.current.leaf.range::<K, _>(range).next() {
-                if self.range.contains(k) {
-                    self.previous = Some(k.clone());
-                    return Some((k.clone(), v.clone()));
-                } else {
+            if let Some((k, v)) = self.current.leaf.get_index(self.next_index) {
+                // iterate over current cached b+ tree leaf node
+                self.next_index += 1;
+                if !self.range.contains(k) {
+                    // we might hit this on the first iteration
+                    continue;
+                }
+                return Some((k.clone(), v.clone()));
+            } else if let Some(next_id) = self.current.next {
+                if !self.range.contains(&*self.current.hi.as_ref().unwrap()) {
+                    // we have reached the end of our range
                     return None;
                 }
-            } else if let Some(next_id) = self.current.next {
                 if let Some(next_view) = self.inner.view_for_id(next_id, &mut self.guard) {
+                    // we were able to take the fast path by following the sibling pointer
                     self.current = next_view;
+                    self.next_index = 0;
                 } else if let Some(ref hi) = self.current.hi {
+                    // we have to take the slow path by traversing the
+                    // tree due to a concurrent merge that deleted the
+                    // right sibling
                     self.current =
                         self.inner
                             .leaf_for_key(hi, self.idgen, self.free_ids, &mut self.guard);
+                    self.next_index = 0;
                 } else {
-                    return None;
+                    panic!(
+                        "somehow hit a node that has a next but not a hi key: {:?}",
+                        self.current
+                    );
                 }
             } else {
+                // end of the collection
                 return None;
             }
         }
@@ -783,7 +787,7 @@ where
         // 1. try to mark the parent's merging_child
         //  a. must not be the left-most child
         //  b. if unsuccessful, give up
-        let is_leftmost_child = parent.index.iter().next().unwrap().0 == &child.lo;
+        let is_leftmost_child = parent.index.is_leftmost(&child.lo);
 
         if is_leftmost_child {
             return Err(());
@@ -833,24 +837,26 @@ where
         // 3. find the left sibling
         let first_left_sibling_guess = parent
             .index
-            .range::<Arc<K>, _>(..&child.lo)
+            .iter()
+            .filter(|(k, _v)| (..&child.lo).contains(&k))
             .next_back()
             .unwrap()
             .1;
-        let mut left_sibling =
-            if let Some(view) = self.view_for_id(*first_left_sibling_guess, guard) {
-                view
-            } else {
-                // the merge already completed and this left sibling has already also been merged
-                /*
-                println!(
-                    "returning early from merge_child because the \
-                    first left sibling guess is freed, meaning the \
-                    merge already succeeded"
-                );
-                */
-                return;
-            };
+
+        let mut left_sibling = if let Some(view) = self.view_for_id(first_left_sibling_guess, guard)
+        {
+            view
+        } else {
+            // the merge already completed and this left sibling has already also been merged
+            /*
+            println!(
+                "returning early from merge_child because the \
+                first left sibling guess is freed, meaning the \
+                merge already succeeded"
+            );
+            */
+            return;
+        };
 
         loop {
             if left_sibling.next.is_none() {
@@ -1039,8 +1045,7 @@ where
 
             if cursor.should_merge() {
                 if let Some(ref mut parent_cursor) = parent_cursor_opt {
-                    let is_leftmost_child =
-                        parent_cursor.index.iter().next().unwrap().0 == &cursor.lo;
+                    let is_leftmost_child = parent_cursor.index.is_leftmost(&cursor.lo);
 
                     if !is_leftmost_child {
                         if let Ok(new_parent) =
@@ -1164,7 +1169,14 @@ where
             }
 
             // go down the tree
-            let child_id = *cursor.index.range::<K, _>(..=key).next_back().unwrap().1;
+            let child_id = cursor
+                .index
+                .iter()
+                .filter(|(k, _v)| (..=&*key).contains(&&**k))
+                .next_back()
+                .unwrap()
+                .1;
+            //let child_id = *cursor.index.range::<K, _>(..=key).next_back().unwrap().1;
             parent_cursor_opt = Some(cursor);
             cursor = if let Some(view) = self.view_for_id(child_id, guard) {
                 view
@@ -1193,8 +1205,8 @@ where
     merging_child: Option<Id>,
     is_merging: bool,
     is_leaf: bool,
-    leaf: BTreeMap<Arc<K>, Arc<V>>,
-    index: BTreeMap<Arc<K>, Id>,
+    leaf: ArrayMap<K, Arc<V>>,
+    index: ArrayMap<K, Id>,
 }
 
 impl<K, V> Clone for Node<K, V>
@@ -1326,13 +1338,25 @@ where
         let split_idx = SPLIT_SIZE / 2;
 
         let (split_point, rhs_leaf, rhs_index) = if self.is_leaf {
-            let split_point = self.leaf.keys().nth(split_idx).unwrap().clone();
+            let split_point = self
+                .leaf
+                .iter()
+                .map(|(k, _v)| k)
+                .nth(split_idx)
+                .unwrap()
+                .clone();
 
             let rhs_leaf = self.leaf.split_off(&split_point);
 
             (split_point, rhs_leaf, Default::default())
         } else {
-            let split_point = self.index.keys().nth(split_idx).unwrap().clone();
+            let split_point = self
+                .index
+                .iter()
+                .map(|(k, _v)| k)
+                .nth(split_idx)
+                .unwrap()
+                .clone();
 
             let rhs_index = self.index.split_off(&split_point);
 
@@ -1366,12 +1390,12 @@ where
         self.next = rhs.next;
 
         if self.is_leaf {
-            for (k, v) in &rhs.leaf {
+            for (k, v) in rhs.leaf.iter() {
                 let prev = self.leaf.insert(k.clone(), v.clone());
                 assert!(prev.is_none());
             }
         } else {
-            for (k, v) in &rhs.index {
+            for (k, v) in rhs.index.iter() {
                 let prev = self.index.insert(k.clone(), *v);
                 assert!(prev.is_none());
             }
@@ -1539,4 +1563,44 @@ fn concurrent_tree() {
             }
         }
     });
+}
+
+#[test]
+fn range_test() {
+    let mut tree = ConcurrentMap::<u64, u64>::default();
+    /*
+     */
+    tree.insert(11, 8);
+    tree.insert(7, 8);
+    tree.insert(7, 7);
+    tree.insert(8, 10);
+    tree.insert(27, 21);
+    tree.insert(0, 31);
+    tree.insert(29, 22);
+    tree.insert(14, 29);
+    tree.insert(9, 0);
+    tree.insert(0, 4);
+    tree.insert(26, 25);
+    tree.insert(0, 0);
+    tree.insert(0, 30);
+    tree.remove(&2);
+    tree.insert(25, 27);
+    tree.insert(0, 0);
+    tree.insert(30, 21);
+    tree.insert(2, 24);
+    tree.remove(&7);
+    tree.remove(&24);
+    tree.insert(32, 7);
+    tree.insert(7, 32);
+    tree.insert(10, 0);
+    tree.insert(21, 2);
+    tree.insert(9, 0);
+    tree.insert(0, 0);
+    tree.insert(24, 0);
+    tree.insert(10, 26);
+
+    println!("range:");
+    for (k, v) in tree.range(17..26) {
+        println!("k, v: {:?}, {:?}", k, v);
+    }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "u-fuzz"
+name = "concurrent-map-fuzz"
 version = "0.0.0"
 authors = ["Automatically generated"]
 publish = false
@@ -17,6 +17,7 @@ arbitrary = { version = "1.0.3", features = ["derive"] }
 
 [dependencies.concurrent-map]
 path = ".."
+features = ["fuzz_constants"]
 
 # Prevent this from interfering with workspaces
 [workspace]

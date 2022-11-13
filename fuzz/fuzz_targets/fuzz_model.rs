@@ -6,7 +6,7 @@ extern crate concurrent_map;
 
 use arbitrary::Arbitrary;
 
-const KEYSPACE: u64 = 32;
+const KEYSPACE: u64 = 128;
 
 #[derive(Debug)]
 enum Op {
@@ -17,18 +17,18 @@ enum Op {
 
 impl<'a> Arbitrary<'a> for Op {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        Ok(if u.ratio(1, 2).unwrap_or(true) {
+        Ok(if u.ratio(1, 2)? {
             Op::Insert {
-                key: u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0),
-                value: u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0),
+                key: u.int_in_range(0..=KEYSPACE as u64)?,
+                value: u.int_in_range(0..=KEYSPACE as u64)?,
             }
-        } else if u.ratio(3, 4).unwrap_or(false) {
+        } else if u.ratio(3, 4)? {
             Op::Remove {
-                key: u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0),
+                key: u.int_in_range(0..=KEYSPACE as u64)?,
             }
         } else {
-            let start = u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0);
-            let end = (start + 1).max(u.int_in_range(0..=KEYSPACE as u64).unwrap_or(0));
+            let start = u.int_in_range(0..=KEYSPACE as u64)?;
+            let end = (start + 1).max(u.int_in_range(0..=KEYSPACE as u64)?);
             Op::Range { start, end }
         })
     }
@@ -38,7 +38,8 @@ fuzz_target!(|ops: Vec<Op>| {
     let mut tree = concurrent_map::ConcurrentMap::default();
     let mut model = std::collections::BTreeMap::new();
 
-    for op in ops {
+    for (_i, op) in ops.into_iter().enumerate() {
+        //println!("op {i}: {:?}", op);
         match op {
             Op::Insert { key, value } => {
                 assert_eq!(
