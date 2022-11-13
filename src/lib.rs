@@ -144,8 +144,16 @@ where
 
 /// This trait should be implemented for anything you wish to use
 /// as a key in the [`ConcurrentMap`].
-pub trait Minimum {
+pub trait Minimum: Ord {
+    /// The returned value must be less than or equal
+    /// to all possible values for this type.
     fn minimum() -> Self;
+}
+
+impl Minimum for () {
+    fn minimum() -> Self {
+        ()
+    }
 }
 
 macro_rules! impl_min {
@@ -166,7 +174,7 @@ impl_min!(usize, u8, u16, u32, u64, u128, isize, i8, i16, i32, i64, i128);
 macro_rules! impl_collection_default {
     ($($t:ty),+) => {
         $(
-            impl<T> Minimum for $t {
+            impl<T: Ord> Minimum for $t {
                 #[inline]
                 fn minimum() -> Self {
                     <$t>::default()
@@ -179,12 +187,11 @@ macro_rules! impl_collection_default {
 impl_collection_default!(
     Vec<T>,
     std::collections::VecDeque<T>,
-    std::collections::HashSet<T>,
     std::collections::BTreeSet<T>,
     std::collections::LinkedList<T>
 );
 
-impl<T> Minimum for &[T] {
+impl<T: Ord> Minimum for &[T] {
     fn minimum() -> Self {
         &[]
     }
