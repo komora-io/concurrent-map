@@ -142,8 +142,9 @@ where
     }
 }
 
-/// This trait should be implemented for anything you wish to use
-/// as a key in the [`ConcurrentMap`].
+/// Trait for types for which a minimum possible value exists.
+///
+/// This trait must be implemented for any `K` key type in the [`ConcurrentMap`].
 pub trait Minimum: Ord {
     /// The returned value must be less than or equal
     /// to all possible values for this type.
