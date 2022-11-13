@@ -1,6 +1,81 @@
+#![cfg_attr(
+    test,
+    deny(
+        missing_docs,
+        future_incompatible,
+        nonstandard_style,
+        rust_2018_idioms,
+        missing_copy_implementations,
+        trivial_casts,
+        trivial_numeric_casts,
+        unused_qualifications,
+    )
+)]
+#![cfg_attr(test, deny(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::decimal_literal_representation,
+    clippy::doc_markdown,
+    // clippy::else_if_without_else,
+    clippy::empty_enum,
+    clippy::explicit_into_iter_loop,
+    clippy::explicit_iter_loop,
+    clippy::expl_impl_clone_on_copy,
+    clippy::fallible_impl_from,
+    clippy::filter_map_next,
+    clippy::float_arithmetic,
+    clippy::get_unwrap,
+    clippy::if_not_else,
+    clippy::indexing_slicing,
+    clippy::inline_always,
+    clippy::integer_arithmetic,
+    clippy::invalid_upcast_comparisons,
+    clippy::items_after_statements,
+    clippy::manual_find_map,
+    clippy::map_entry,
+    clippy::map_flatten,
+    clippy::match_like_matches_macro,
+    clippy::match_same_arms,
+    clippy::maybe_infinite_iter,
+    clippy::mem_forget,
+    // clippy::missing_docs_in_private_items,
+    clippy::module_name_repetitions,
+    clippy::multiple_inherent_impl,
+    clippy::mut_mut,
+    clippy::needless_borrow,
+    clippy::needless_continue,
+    clippy::needless_pass_by_value,
+    clippy::non_ascii_literal,
+    clippy::path_buf_push_overwrite,
+    // clippy::print_stdout,
+    clippy::redundant_closure_for_method_calls,
+    clippy::shadow_reuse,
+    clippy::shadow_same,
+    clippy::shadow_unrelated,
+    clippy::single_match_else,
+    clippy::string_add,
+    clippy::string_add_assign,
+    clippy::type_repetition_in_bounds,
+    clippy::unicode_not_nfc,
+    clippy::unimplemented,
+    clippy::unseparated_literal_suffix,
+    clippy::used_underscore_binding,
+    clippy::wildcard_dependencies,
+))]
+#![cfg_attr(
+    test,
+    warn(
+        clippy::missing_const_for_fn,
+        clippy::multiple_crate_versions,
+        clippy::wildcard_enum_match_arm,
+    )
+)]
 mod stack;
 
-use stack::{ConcurrentStack, ConcurrentStackPusher};
+use stack::{Pusher, Stack};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -47,10 +122,7 @@ where
     V: 'static + fmt::Debug + Send + Sync,
 {
     DropNode(Box<Node<K, V>>),
-    MarkIdReusable {
-        stack: ConcurrentStackPusher<u64>,
-        id: Id,
-    },
+    MarkIdReusable { stack: Pusher<u64>, id: Id },
 }
 
 impl<K, V> Drop for Deferred<K, V>
@@ -155,9 +227,7 @@ pub trait Minimum: Ord {
 }
 
 impl Minimum for () {
-    fn minimum() -> Self {
-        ()
-    }
+    fn minimum() -> Self {}
 }
 
 macro_rules! impl_min {
@@ -259,7 +329,7 @@ where
     // new node id generator
     idgen: Arc<AtomicU64>,
     // store freed node ids for reuse here
-    free_ids: ConcurrentStack<u64>,
+    free_ids: Stack<u64>,
     // the tree structure, separate from the other
     // types so that we can mix mutable references
     // to ebr with immutable references to other
@@ -308,7 +378,7 @@ where
         ConcurrentMap {
             ebr: Ebr::default(),
             idgen: Arc::new(2.into()),
-            free_ids: ConcurrentStack::default(),
+            free_ids: Stack::default(),
             inner,
         }
     }
@@ -356,9 +426,9 @@ where
         for lhs_id in lhs_chain {
             let mut next_opt = Some(lhs_id);
             while let Some(next) = next_opt {
-                let cursor = self.view_for_id(next, &mut guard).unwrap();
-                next_opt = cursor.next;
-                let node_box = unsafe { Box::from_raw(cursor.ptr.as_ptr()) };
+                let sibling_cursor = self.view_for_id(next, &mut guard).unwrap();
+                next_opt = sibling_cursor.next;
+                let node_box = unsafe { Box::from_raw(sibling_cursor.ptr.as_ptr()) };
                 drop(node_box);
             }
         }
@@ -604,7 +674,7 @@ where
 {
     inner: &'a Inner<K, V>,
     idgen: &'a AtomicU64,
-    free_ids: &'a mut ConcurrentStack<u64>,
+    free_ids: &'a mut Stack<u64>,
     guard: Guard<'a, Deferred<K, V>>,
     range: R,
     previous: Option<Arc<K>>,
@@ -741,7 +811,7 @@ where
         &'a self,
         parent: &mut NodeView<'a, K, V>,
         child: &mut NodeView<'a, K, V>,
-        free_ids: &ConcurrentStack<u64>,
+        free_ids: &Stack<u64>,
         guard: &mut Guard<'a, Deferred<K, V>>,
     ) {
         // 2. mark child as merging
@@ -933,7 +1003,7 @@ where
         &'a self,
         key: &K,
         idgen: &AtomicU64,
-        free_ids: &mut ConcurrentStack<u64>,
+        free_ids: &mut Stack<u64>,
         guard: &mut Guard<'a, Deferred<K, V>>,
     ) -> NodeView<'a, K, V> {
         // println!("looking for key {key:?}");
@@ -1016,9 +1086,9 @@ where
                                     .pop()
                                     .unwrap_or_else(|| idgen.fetch_add(1, Ordering::Relaxed));
 
-                                let (lhs, rhs) = parent_clone.split(new_id);
+                                let (new_lhs, new_rhs) = parent_clone.split(new_id);
 
-                                let rhs_ptr = Box::into_raw(Box::new(rhs));
+                                let rhs_ptr = Box::into_raw(Box::new(new_rhs));
 
                                 let atomic_ptr_ref = self.table.get(new_id);
 
@@ -1028,7 +1098,7 @@ where
 
                                 rhs_id = Some(new_id);
 
-                                parent_clone = Box::new(lhs);
+                                parent_clone = Box::new(new_lhs);
                             };
 
                             if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
@@ -1069,10 +1139,9 @@ where
                             };
                             parent_cursor_opt = Some(parent_view);
                         } else {
-                            let atomic_ptr_ref = self.table.get(new_id);
-
                             let root_ptr =
                                 atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                            assert_eq!(new_root_ptr, root_ptr);
                             let dangling_root = unsafe { Box::from_raw(root_ptr) };
                             drop(dangling_root);
 
@@ -1381,7 +1450,7 @@ fn timing_tree() {
     let insert_elapsed = insert.elapsed();
     println!(
         "{} inserts/s, total {:?}",
-        (n * 1000) / insert_elapsed.as_millis() as u64,
+        (n * 1000) / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
         insert_elapsed
     );
 
@@ -1390,7 +1459,7 @@ fn timing_tree() {
     let scan_elapsed = scan.elapsed();
     println!(
         "{} scanned items/s, total {:?}",
-        (n * 1000) / scan_elapsed.as_millis() as u64,
+        (n * 1000) / u64::try_from(scan_elapsed.as_millis()).unwrap_or(u64::MAX),
         scan_elapsed
     );
 
@@ -1401,7 +1470,7 @@ fn timing_tree() {
     let gets_elapsed = gets.elapsed();
     println!(
         "{} gets/s, total {:?}",
-        (n * 1000) / gets_elapsed.as_millis() as u64,
+        (n * 1000) / u64::try_from(gets_elapsed.as_millis()).unwrap_or(u64::MAX),
         gets_elapsed
     );
 }
@@ -1409,7 +1478,10 @@ fn timing_tree() {
 #[test]
 fn concurrent_tree() {
     let n: u16 = 1024;
-    let concurrency: u16 = 8;
+    let concurrency = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(8)
+        * 2;
 
     let run = |mut tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bits| {
         let shift = concurrency.next_power_of_two().trailing_zeros();
@@ -1439,11 +1511,7 @@ fn concurrent_tree() {
 
         for key in 0_u16..n {
             let i = unique_key(key);
-            assert_eq!(
-                visible.get(&i).map(|arc| *arc),
-                Some(i),
-                "failed to get key {i}"
-            );
+            assert_eq!(visible.get(&i).copied(), Some(i), "failed to get key {i}");
         }
 
         for key in 0..n {
@@ -1460,16 +1528,16 @@ fn concurrent_tree() {
 
     std::thread::scope(|s| {
         for _ in 0..64 {
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency as usize));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency));
             let mut threads = vec![];
             for i in 0..concurrency {
-                let tree = tree.clone();
-                let barrier = barrier.clone();
+                let tree_2 = tree.clone();
+                let barrier_2 = barrier.clone();
 
-                let thread = s.spawn(move || run(tree, &barrier, i));
+                let thread = s.spawn(move || run(tree_2, &barrier_2, u16::try_from(i).unwrap()));
                 threads.push(thread);
             }
-            for thread in threads.into_iter() {
+            for thread in threads {
                 thread.join().unwrap();
             }
         }

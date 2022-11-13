@@ -15,11 +15,11 @@ struct Node<T: Send> {
 unsafe impl<T: Send> Send for Node<T> {}
 
 #[derive(Default, Clone, Debug)]
-pub struct ConcurrentStackPusher<T: 'static + Send> {
+pub struct Pusher<T: 'static + Send> {
     head: Arc<AtomicPtr<Node<T>>>,
 }
 
-impl<T: Send> Drop for ConcurrentStackPusher<T> {
+impl<T: Send> Drop for Pusher<T> {
     fn drop(&mut self) {
         if Arc::strong_count(&self.head) != 1 {
             return;
@@ -36,7 +36,7 @@ impl<T: Send> Drop for ConcurrentStackPusher<T> {
     }
 }
 
-impl<T: Send> ConcurrentStackPusher<T> {
+impl<T: Send> Pusher<T> {
     pub fn push(&self, item: T) {
         let mut head = self.head.load(Ordering::Acquire);
 
@@ -67,12 +67,12 @@ impl<T: Send> ConcurrentStackPusher<T> {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct ConcurrentStack<T: 'static + Send> {
+pub struct Stack<T: 'static + Send> {
     head: Arc<AtomicPtr<Node<T>>>,
     ebr: Ebr<Box<Node<T>>>,
 }
 
-impl<T: Send> Drop for ConcurrentStack<T> {
+impl<T: Send> Drop for Stack<T> {
     fn drop(&mut self) {
         if Arc::strong_count(&self.head) != 1 {
             return;
@@ -89,7 +89,7 @@ impl<T: Send> Drop for ConcurrentStack<T> {
     }
 }
 
-impl<T: Send> ConcurrentStack<T> {
+impl<T: Send> Stack<T> {
     pub fn push(&self, item: T) {
         let mut head = self.head.load(Ordering::Acquire);
 
@@ -149,8 +149,8 @@ impl<T: Send> ConcurrentStack<T> {
     /// Returns a push-only stack handle. This is better
     /// to use where possible, because it avoids registering
     /// shared state with the epoch-based reclamation system.
-    pub fn get_pusher(&self) -> ConcurrentStackPusher<T> {
-        ConcurrentStackPusher {
+    pub fn get_pusher(&self) -> Pusher<T> {
+        Pusher {
             head: self.head.clone(),
         }
     }
@@ -160,7 +160,7 @@ impl<T: Send> ConcurrentStack<T> {
 fn basic_stack() {
     const N: usize = 128;
 
-    let mut stack = ConcurrentStack::<String>::default();
+    let mut stack = Stack::<String>::default();
     for _ in 0..N {
         stack.push("yo".into());
     }
