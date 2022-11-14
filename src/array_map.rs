@@ -49,7 +49,7 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
-        if let Ok(index) = self.binary_search(&key) {
+        if let Ok(index) = self.binary_search(key) {
             Some(unsafe { &self.inner.get_unchecked(index).assume_init_ref().1 })
         } else {
             None
@@ -83,7 +83,7 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        if let Ok(index) = self.binary_search(&key) {
+        if let Ok(index) = self.binary_search(key) {
             unsafe {
                 let ret = std::ptr::read(self.inner.get_unchecked(index).as_ptr()).1;
 
@@ -104,7 +104,7 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
     }
 
     pub fn contains_key(&self, key: &K) -> bool {
-        self.binary_search(&key).is_ok()
+        self.binary_search(key).is_ok()
     }
 
     pub fn is_leftmost(&self, key: &K) -> bool {

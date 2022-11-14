@@ -701,7 +701,7 @@ where
                 }
                 return Some((k.clone(), v.clone()));
             } else if let Some(next_id) = self.current.next {
-                if !self.range.contains(&*self.current.hi.as_ref().unwrap()) {
+                if !self.range.contains(self.current.hi.as_ref().unwrap()) {
                     // we have reached the end of our range
                     return None;
                 }
@@ -929,10 +929,9 @@ where
             assert!(!left_sibling_clone.should_split());
 
             let cas_result = left_sibling.cas(left_sibling_clone, guard);
-            if cas_result.is_err() && split_rhs_id_opt.is_some() {
+            if let (Err(_), Some(split_rhs_id)) = (&cas_result, split_rhs_id_opt) {
                 // We need to free the split right sibling that
                 // we installed.
-                let split_rhs_id = split_rhs_id_opt.unwrap();
                 let atomic_ptr_ref = self.table.get(split_rhs_id);
 
                 // clear dangling ptr (cas freed it already)
