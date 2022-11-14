@@ -81,6 +81,7 @@ use array_map::ArrayMap;
 use stack::{Pusher, Stack};
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::{
@@ -336,15 +337,14 @@ where
     V: 'static + Clone + fmt::Debug + Send + Sync,
 {
     fn default() -> ConcurrentMap<K, V, FANOUT> {
-        let initial_root_id = 0;
-        let initial_leaf_id = 1;
+        let initial_root_id = 1;
+        let initial_leaf_id = 2;
 
         let table = PageTable::<AtomicPtr<Node<K, V, FANOUT>>>::default();
 
         let mut root_node = Node::<K, V, FANOUT>::new_root();
-        root_node
-            .index
-            .insert(root_node.lo.clone(), initial_leaf_id);
+        let root_node_lo = root_node.lo.clone();
+        root_node.index_mut().insert(root_node_lo, initial_leaf_id);
         let leaf_node = Node::<K, V, FANOUT>::new_leaf(root_node.lo.clone());
 
         let root_ptr = Box::into_raw(root_node);
@@ -370,7 +370,7 @@ where
 
         ConcurrentMap {
             ebr: Ebr::default(),
-            idgen: Arc::new(2.into()),
+            idgen: Arc::new(3.into()),
             free_ids: Stack::default(),
             inner,
         }
@@ -408,10 +408,10 @@ where
         let mut lhs_chain = vec![];
         loop {
             lhs_chain.push(cursor.id);
-            if cursor.is_leaf {
+            if cursor.is_leaf() {
                 break;
             }
-            let child_id = cursor.index.iter().next().unwrap().1;
+            let child_id = cursor.index().iter().next().unwrap().1;
 
             cursor = self.view_for_id(child_id, &mut guard).unwrap();
         }
@@ -420,7 +420,7 @@ where
             let mut next_opt = Some(lhs_id);
             while let Some(next) = next_opt {
                 let sibling_cursor = self.view_for_id(next, &mut guard).unwrap();
-                next_opt = sibling_cursor.next;
+                next_opt = sibling_cursor.next.map(NonZeroU64::get);
                 let node_box = unsafe { Box::from_raw(sibling_cursor.ptr.as_ptr()) };
                 drop(node_box);
             }
@@ -453,7 +453,7 @@ where
                 .leaf_for_key(&key, &self.idgen, &mut self.free_ids, &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             assert!(
-                leaf_clone.leaf.len() < (FANOUT - MERGE_SIZE),
+                leaf_clone.len() < (FANOUT - MERGE_SIZE),
                 "bad leaf: should split: {},  {:?}",
                 leaf_clone.should_split(),
                 *leaf_clone
@@ -649,7 +649,7 @@ where
             .leaf_for_key(start, &self.idgen, &mut self.free_ids, &mut guard);
 
         let next_index = current
-            .leaf
+            .leaf()
             .iter()
             .position(|(k, _v)| range.contains(k))
             .unwrap_or(0);
@@ -692,7 +692,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some((k, v)) = self.current.leaf.get_index(self.next_index) {
+            if let Some((k, v)) = self.current.leaf().get_index(self.next_index) {
                 // iterate over current cached b+ tree leaf node
                 self.next_index += 1;
                 if !self.range.contains(k) {
@@ -705,7 +705,7 @@ where
                     // we have reached the end of our range
                     return None;
                 }
-                if let Some(next_view) = self.inner.view_for_id(next_id, &mut self.guard) {
+                if let Some(next_view) = self.inner.view_for_id(next_id.get(), &mut self.guard) {
                     // we were able to take the fast path by following the sibling pointer
                     self.current = next_view;
                     self.next_index = 0;
@@ -787,13 +787,13 @@ where
         // 1. try to mark the parent's merging_child
         //  a. must not be the left-most child
         //  b. if unsuccessful, give up
-        let is_leftmost_child = parent.index.is_leftmost(&child.lo);
+        let is_leftmost_child = parent.index().is_leftmost(&child.lo);
 
         if is_leftmost_child {
             return Err(());
         }
 
-        if !parent.index.contains_key(&child.lo) {
+        if !parent.index().contains_key(&child.lo) {
             // can't install a parent merge if the child is unknown to the parent.
             return Err(());
         }
@@ -804,7 +804,7 @@ where
         }
 
         let mut parent_clone: Box<Node<K, V, FANOUT>> = Box::new((*parent).clone());
-        parent_clone.merging_child = Some(child.id);
+        parent_clone.merging_child = Some(NonZeroU64::new(child.id).unwrap());
         parent.cas(parent_clone, guard).map_err(|_| ())
     }
 
@@ -837,7 +837,7 @@ where
 
         // 3. find the left sibling
         let first_left_sibling_guess = parent
-            .index
+            .index()
             .iter()
             .filter(|(k, _v)| (..&child.lo).contains(&k))
             .next_back()
@@ -872,7 +872,7 @@ where
                 break;
             }
 
-            let next = left_sibling.next.unwrap();
+            let next = left_sibling.next.unwrap().get();
             if next != child.id {
                 left_sibling = if let Some(view) = self.view_for_id(next, guard) {
                     view
@@ -959,14 +959,14 @@ where
         }
 
         // 5. cas the parent to remove the merged child
-        while parent.merging_child == Some(child.id) {
+        while parent.merging_child.map(NonZeroU64::get) == Some(child.id) {
             let mut parent_clone: Box<Node<K, V, FANOUT>> = Box::new((*parent).clone());
 
             assert!(parent_clone.merging_child.is_some());
-            assert!(parent_clone.index.contains_key(&child.lo));
+            assert!(parent_clone.index().contains_key(&child.lo));
 
             parent_clone.merging_child = None;
-            parent_clone.index.remove(&child.lo).unwrap();
+            parent_clone.index_mut().remove(&child.lo).unwrap();
 
             let cas_result = parent.cas(parent_clone, guard);
             match cas_result {
@@ -1074,7 +1074,8 @@ where
         loop {
             // println!("cursor is: {} -> {:?}", cursor.id, *cursor);
             if let Some(merging_child_id) = cursor.merging_child {
-                let mut child = if let Some(view) = self.view_for_id(merging_child_id, guard) {
+                let mut child = if let Some(view) = self.view_for_id(merging_child_id.get(), guard)
+                {
                     view
                 } else {
                     reset!("merging child of marked parent already freed");
@@ -1089,7 +1090,7 @@ where
 
             if cursor.should_merge() {
                 if let Some(ref mut parent_cursor) = parent_cursor_opt {
-                    let is_leftmost_child = parent_cursor.index.is_leftmost(&cursor.lo);
+                    let is_leftmost_child = parent_cursor.index().is_leftmost(&cursor.lo);
 
                     if !is_leftmost_child {
                         if let Ok(new_parent) =
@@ -1104,7 +1105,7 @@ where
                         reset!("completed merge_child");
                     }
                 } else {
-                    assert!(!cursor.is_leaf);
+                    assert!(!cursor.is_leaf());
                 }
             }
 
@@ -1113,7 +1114,7 @@ where
                 if key >= hi {
                     // go right to the tree sibling
                     let next = cursor.next.unwrap();
-                    let rhs = if let Some(view) = self.view_for_id(next, guard) {
+                    let rhs = if let Some(view) = self.view_for_id(next.get(), guard) {
                         view
                     } else {
                         // println!("right child {next} not found");
@@ -1124,8 +1125,8 @@ where
                         if parent_cursor.is_viable_parent_for(&rhs) {
                             let mut parent_clone: Box<Node<K, V, FANOUT>> =
                                 Box::new((*parent_cursor).clone());
-                            assert!(!parent_clone.is_leaf);
-                            parent_clone.index.insert(rhs.lo.clone(), next);
+                            assert!(!parent_clone.is_leaf());
+                            parent_clone.index_mut().insert(rhs.lo.clone(), next.get());
 
                             let mut rhs_id = None;
 
@@ -1167,8 +1168,8 @@ where
                             .unwrap_or_else(|| idgen.fetch_add(1, Ordering::Relaxed));
 
                         let mut new_root_node = Node::<K, V, FANOUT>::new_root();
-                        new_root_node.index.insert(cursor.lo.clone(), root_id);
-                        new_root_node.index.insert(rhs.lo.clone(), next);
+                        new_root_node.index_mut().insert(cursor.lo.clone(), root_id);
+                        new_root_node.index_mut().insert(rhs.lo.clone(), next.get());
                         let new_root_ptr = Box::into_raw(new_root_node);
 
                         let atomic_ptr_ref = self.table.get(new_id);
@@ -1204,7 +1205,7 @@ where
                 }
             }
 
-            if cursor.is_leaf {
+            if cursor.is_leaf() {
                 assert!(!cursor.is_merging);
                 assert!(cursor.merging_child.is_none());
                 assert!(cursor.lo <= *key);
@@ -1215,7 +1216,7 @@ where
             }
 
             // go down the tree
-            let child_id = cursor.index.index_next_child(key);
+            let child_id = cursor.index().index_next_child(key);
 
             parent_cursor_opt = Some(cursor);
             cursor = if let Some(view) = self.view_for_id(child_id, guard) {
@@ -1233,20 +1234,28 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+enum Data<K, V, const FANOUT: usize>
+where
+    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + fmt::Debug + Send + Sync,
+{
+    Leaf(ArrayMap<K, V, FANOUT>),
+    Index(ArrayMap<K, Id, FANOUT>),
+}
+
 #[derive(Debug)]
 struct Node<K, V, const FANOUT: usize>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
 {
+    next: Option<NonZeroU64>,
+    merging_child: Option<NonZeroU64>,
+    data: Data<K, V, FANOUT>,
     lo: K,
     hi: Option<K>,
-    next: Option<Id>,
-    merging_child: Option<Id>,
     is_merging: bool,
-    is_leaf: bool,
-    leaf: ArrayMap<K, V, FANOUT>,
-    index: ArrayMap<K, Id, FANOUT>,
 }
 
 impl<K, V, const FANOUT: usize> Clone for Node<K, V, FANOUT>
@@ -1259,9 +1268,7 @@ where
             lo: self.lo.clone(),
             hi: self.hi.clone(),
             next: self.next,
-            is_leaf: self.is_leaf,
-            leaf: self.leaf.clone(),
-            index: self.index.clone(),
+            data: self.data.clone(),
             merging_child: self.merging_child,
             is_merging: self.is_merging,
         }
@@ -1273,15 +1280,49 @@ where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
 {
+    const fn index(&self) -> &ArrayMap<K, Id, FANOUT> {
+        if let Data::Index(ref index) = self.data {
+            index
+        } else {
+            unreachable!()
+        }
+    }
+
+    fn index_mut(&mut self) -> &mut ArrayMap<K, Id, FANOUT> {
+        if let Data::Index(ref mut index) = self.data {
+            index
+        } else {
+            unreachable!()
+        }
+    }
+
+    const fn leaf(&self) -> &ArrayMap<K, V, FANOUT> {
+        if let Data::Leaf(ref leaf) = self.data {
+            leaf
+        } else {
+            unreachable!()
+        }
+    }
+
+    fn leaf_mut(&mut self) -> &mut ArrayMap<K, V, FANOUT> {
+        if let Data::Leaf(ref mut leaf) = self.data {
+            leaf
+        } else {
+            unreachable!()
+        }
+    }
+
+    const fn is_leaf(&self) -> bool {
+        matches!(self.data, Data::Leaf(..))
+    }
+
     fn new_root() -> Box<Node<K, V, FANOUT>> {
         let min_key = K::minimum();
         Box::new(Node {
             lo: min_key,
             hi: None,
             next: None,
-            is_leaf: false,
-            leaf: Default::default(),
-            index: Default::default(),
+            data: Data::Index(Default::default()),
             merging_child: None,
             is_merging: false,
         })
@@ -1292,9 +1333,7 @@ where
             lo,
             hi: None,
             next: None,
-            is_leaf: true,
-            leaf: Default::default(),
-            index: Default::default(),
+            data: Data::Leaf(Default::default()),
             merging_child: None,
             is_merging: false,
         })
@@ -1303,16 +1342,16 @@ where
     fn get(&self, key: &K) -> Option<V> {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
-        assert!(self.is_leaf);
+        assert!(self.is_leaf());
 
-        self.leaf.get(key).cloned()
+        self.leaf().get(key).cloned()
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
 
-        self.leaf.remove(key)
+        self.leaf_mut().remove(key)
     }
 
     fn insert(&mut self, key: K, value: V) -> Option<V> {
@@ -1320,7 +1359,7 @@ where
         assert!(self.merging_child.is_none());
         assert!(!self.should_split());
 
-        self.leaf.insert(key, value)
+        self.leaf_mut().insert(key, value)
     }
 
     pub fn cas(
@@ -1335,12 +1374,12 @@ where
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
 
-        match (old, self.leaf.get(&key)) {
+        match (old, self.leaf().get(&key)) {
             (expected, actual) if expected == actual => {
                 if let Some(to_insert) = new {
-                    Ok(self.leaf.insert(key, to_insert))
+                    Ok(self.leaf_mut().insert(key, to_insert))
                 } else {
-                    Ok(self.leaf.remove(&key))
+                    Ok(self.leaf_mut().remove(&key))
                 }
             }
             (_, actual) => Err(CasFailure {
@@ -1354,21 +1393,20 @@ where
         if self.merging_child.is_some() || self.is_merging {
             return false;
         }
-        if self.is_leaf {
-            self.leaf.len() <= MERGE_SIZE
-        } else {
-            self.index.len() <= MERGE_SIZE
-        }
+        self.len() <= MERGE_SIZE
     }
 
     const fn should_split(&self) -> bool {
         if self.merging_child.is_some() || self.is_merging {
             return false;
         }
-        if self.is_leaf {
-            self.leaf.len() >= FANOUT - MERGE_SIZE
-        } else {
-            self.index.len() >= FANOUT - MERGE_SIZE
+        self.len() >= FANOUT - MERGE_SIZE
+    }
+
+    const fn len(&self) -> usize {
+        match self.data {
+            Data::Leaf(ref leaf) => leaf.len(),
+            Data::Index(ref index) => index.len(),
         }
     }
 
@@ -1378,26 +1416,25 @@ where
 
         let split_idx = FANOUT / 2;
 
-        let (split_point, rhs_leaf, rhs_index) = if self.is_leaf {
-            let (split_point, rhs_leaf) = self.leaf.split_off(split_idx);
-
-            (split_point, rhs_leaf, Default::default())
-        } else {
-            let (split_point, rhs_index) = self.index.split_off(split_idx);
-
-            (split_point, Default::default(), rhs_index)
+        let (split_point, rhs_data) = match self.data {
+            Data::Leaf(ref mut leaf) => {
+                let (split_point, rhs_leaf) = leaf.split_off(split_idx);
+                (split_point, Data::Leaf(rhs_leaf))
+            }
+            Data::Index(ref mut index) => {
+                let (split_point, rhs_index) = index.split_off(split_idx);
+                (split_point, Data::Index(rhs_index))
+            }
         };
 
         let rhs_hi = std::mem::replace(&mut self.hi, Some(split_point.clone()));
-        let rhs_next = std::mem::replace(&mut self.next, Some(new_id));
+        let rhs_next = std::mem::replace(&mut self.next, Some(NonZeroU64::new(new_id).unwrap()));
 
         let rhs = Node {
             lo: split_point.clone(),
             hi: rhs_hi,
             next: rhs_next,
-            is_leaf: self.is_leaf,
-            index: rhs_index,
-            leaf: rhs_leaf,
+            data: rhs_data,
             merging_child: None,
             is_merging: false,
         };
@@ -1414,17 +1451,20 @@ where
         self.hi = rhs.hi.clone();
         self.next = rhs.next;
 
-        if self.is_leaf {
-            for (k, v) in rhs.leaf.iter() {
-                let prev = self.leaf.insert(k.clone(), v.clone());
-                assert!(prev.is_none());
+        match self.data {
+            Data::Leaf(ref mut leaf) => {
+                for (k, v) in rhs.leaf().iter() {
+                    let prev = leaf.insert(k.clone(), v.clone());
+                    assert!(prev.is_none());
+                }
             }
-        } else {
-            for (k, v) in rhs.index.iter() {
-                let prev = self.index.insert(k.clone(), *v);
-                assert!(prev.is_none());
+            Data::Index(ref mut index) => {
+                for (k, v) in rhs.index().iter() {
+                    let prev = index.insert(k.clone(), *v);
+                    assert!(prev.is_none());
+                }
             }
-        };
+        }
     }
 
     fn is_viable_parent_for(&self, possible_child: &NodeView<'_, K, V, FANOUT>) -> bool {
@@ -1570,6 +1610,77 @@ fn concurrent_tree() {
             for thread in threads {
                 thread.join().unwrap();
             }
+        }
+    });
+}
+
+#[test]
+fn billion_scan() {
+    let n: u32 = 16 * 1024 * 1024;
+    let concurrency = 8;
+    let stride = n / concurrency;
+
+    let fill =
+        |mut tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier, start_fill, stop_fill| {
+            barrier.wait();
+            let insert = std::time::Instant::now();
+            for i in start_fill..stop_fill {
+                tree.insert(i, i);
+            }
+            let insert_elapsed = insert.elapsed();
+            println!(
+                "{} inserts/s, total {:?}",
+                (stride as u64 * 1000)
+                    / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
+                insert_elapsed
+            );
+        };
+
+    let read = |mut tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier| {
+        barrier.wait();
+        let scan = std::time::Instant::now();
+        let count = tree.range(..).take(stride as _).count();
+        assert_eq!(count, stride as _);
+        let scan_elapsed = scan.elapsed();
+        println!(
+            "{} scanned items/s, total {:?}",
+            (stride as u64 * 1000)
+                / u64::try_from(scan_elapsed.as_millis().max(1)).unwrap_or(u64::MAX),
+            scan_elapsed
+        );
+    };
+
+    let tree = ConcurrentMap::default();
+    let barrier = std::sync::Barrier::new(concurrency as _);
+
+    std::thread::scope(|s| {
+        let mut threads = vec![];
+        for i in 0..concurrency {
+            let tree_2 = tree.clone();
+            let barrier_2 = &barrier;
+
+            let start_fill = i * stride;
+            let stop_fill = (i + 1) * stride;
+
+            let thread = s.spawn(move || fill(tree_2, &barrier_2, start_fill, stop_fill));
+            threads.push(thread);
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    });
+
+    std::thread::scope(|s| {
+        let mut threads = vec![];
+        for _ in 0..concurrency {
+            let tree_2 = tree.clone();
+            let barrier_2 = &barrier;
+
+            let thread = s.spawn(move || read(tree_2, &barrier_2));
+            threads.push(thread);
+        }
+        for thread in threads {
+            thread.join().unwrap();
         }
     });
 }
