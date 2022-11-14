@@ -1,7 +1,8 @@
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
-const MAX_LEN: usize = super::SPLIT_SIZE;
+// we must have enough space to merge a sibling into us
+const MAX_LEN: usize = super::SPLIT_SIZE + super::MERGE_SIZE;
 
 // TODO make it a const array
 #[derive(Debug)]

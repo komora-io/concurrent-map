@@ -97,14 +97,11 @@ use pagetable::PageTable;
 #[cfg(any(test, feature = "fuzz_constants"))]
 const SPLIT_SIZE: usize = 4;
 
-#[cfg(any(test, feature = "fuzz_constants"))]
+#[cfg(all(not(test), not(feature = "fuzz_constants")))]
+const SPLIT_SIZE: usize = 15;
+
+// NB this must always be 1
 const MERGE_SIZE: usize = 1;
-
-#[cfg(all(not(test), not(feature = "fuzz_constants")))]
-const SPLIT_SIZE: usize = 16;
-
-#[cfg(all(not(test), not(feature = "fuzz_constants")))]
-const MERGE_SIZE: usize = 3;
 
 type Id = u64;
 
@@ -463,6 +460,12 @@ where
                 self.inner
                     .leaf_for_key(&*key_arc, &self.idgen, &mut self.free_ids, &mut guard);
             let mut leaf_clone: Box<Node<K, V>> = Box::new((*leaf).clone());
+            assert!(
+                leaf_clone.leaf.len() < SPLIT_SIZE,
+                "bad leaf: should split: {},  {:?}",
+                leaf_clone.should_split(),
+                *leaf_clone
+            );
             let ret = leaf_clone.insert(key_arc.clone(), value_arc.clone());
 
             let mut rhs_id = None;
@@ -474,6 +477,9 @@ where
                     .unwrap_or_else(|| self.idgen.fetch_add(1, Ordering::Relaxed));
 
                 let (lhs, rhs) = leaf_clone.split(new_id);
+
+                assert!(!lhs.should_split());
+                assert!(!rhs.should_split());
 
                 let rhs_ptr = Box::into_raw(Box::new(rhs));
 
@@ -487,6 +493,8 @@ where
 
                 leaf_clone = Box::new(lhs);
             };
+
+            assert!(!leaf_clone.should_split());
 
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
 
@@ -770,6 +778,7 @@ where
     // 4. cas the left sibling to eat the right sibling
     //  a. loop until successful
     //  b. go right if the left-most child split and no-longer points to merging child
+    //  c. split the new larger left sibling if it is at the split threshold
     // 5. cas the parent to remove the merged child
     // 6. remove the child's pointer in the page table
     // 7. defer the reclamation of the child node
@@ -812,7 +821,8 @@ where
         &'a self,
         parent: &mut NodeView<'a, K, V>,
         child: &mut NodeView<'a, K, V>,
-        free_ids: &Stack<u64>,
+        idgen: &AtomicU64,
+        free_ids: &mut Stack<u64>,
         guard: &mut Guard<'a, Deferred<K, V>>,
     ) {
         // 2. mark child as merging
@@ -892,9 +902,52 @@ where
             // 4. cas the left sibling to eat the right sibling
             //  a. loop until successful
             //  b. go right if the left-most child split and no-longer points to merging child
+            //  c. split the new larger left sibling if it is at the split threshold
             let mut left_sibling_clone: Box<Node<K, V>> = Box::new((*left_sibling).clone());
             left_sibling_clone.merge(child);
+
+            let mut split_rhs_id_opt = None;
+
+            if left_sibling_clone.should_split() {
+                // we have to try to split the sibling, funny enough.
+                // this is the consequence of using fixed-size arrays
+                // for storing items with no flexibility.
+
+                let new_id = free_ids
+                    .pop()
+                    .unwrap_or_else(|| idgen.fetch_add(1, Ordering::Relaxed));
+
+                let (lhs, rhs) = left_sibling_clone.split(new_id);
+
+                assert!(!lhs.should_split());
+                assert!(!rhs.should_split());
+
+                let rhs_ptr = Box::into_raw(Box::new(rhs));
+
+                let atomic_ptr_ref = self.table.get(new_id);
+
+                let prev = atomic_ptr_ref.swap(rhs_ptr, Ordering::Release);
+
+                assert!(prev.is_null());
+
+                split_rhs_id_opt = Some(new_id);
+
+                left_sibling_clone = Box::new(lhs);
+            };
+
+            assert!(!left_sibling_clone.should_split());
+
             let cas_result = left_sibling.cas(left_sibling_clone, guard);
+            if cas_result.is_err() && split_rhs_id_opt.is_some() {
+                // We need to free the split right sibling that
+                // we installed.
+                let split_rhs_id = split_rhs_id_opt.unwrap();
+                let atomic_ptr_ref = self.table.get(split_rhs_id);
+
+                // clear dangling ptr (cas freed it already)
+                let _rhs_ptr = atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                free_ids.push(split_rhs_id);
+            }
             match cas_result {
                 Ok(_) => {
                     // println!("successfully merged child into its left sibling");
@@ -1035,7 +1088,7 @@ where
                 } else {
                     reset!("merging child of marked parent already freed");
                 };
-                self.merge_child(&mut cursor, &mut child, free_ids, guard);
+                self.merge_child(&mut cursor, &mut child, idgen, free_ids, guard);
                 reset!("cooperatively performed merge_child after detecting parent");
             }
 
@@ -1056,9 +1109,11 @@ where
                             reset!("failed to install parent merge");
                         }
 
-                        self.merge_child(parent_cursor, &mut cursor, free_ids, guard);
+                        self.merge_child(parent_cursor, &mut cursor, idgen, free_ids, guard);
                         reset!("completed merge_child");
                     }
+                } else {
+                    assert!(!cursor.is_leaf);
                 }
             }
 
@@ -1272,6 +1327,7 @@ where
     fn insert(&mut self, key: Arc<K>, value: Arc<V>) -> Option<Arc<V>> {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
+        assert!(!self.should_split());
 
         self.leaf.insert(key, value)
     }
