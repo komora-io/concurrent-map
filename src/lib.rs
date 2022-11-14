@@ -527,7 +527,6 @@ where
     /// # Examples
     ///
     /// ```
-    /// # use std::sync::Arc;
     /// let mut tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
     /// // key 1 does not yet exist
@@ -536,18 +535,18 @@ where
     /// // uniquely create value 10
     /// tree.cas(1, None, Some(10)).unwrap();
     ///
-    /// assert_eq!(*tree.get(&1).unwrap(), 10);
+    /// assert_eq!(tree.get(&1).unwrap(), 10);
     ///
     /// // compare and swap from value 10 to value 20
-    /// tree.cas(1, Some(&10), Some(20)).unwrap();
+    /// tree.cas(1, Some(&10_usize), Some(20)).unwrap();
     ///
-    /// assert_eq!(*tree.get(&1).unwrap(), 20);
+    /// assert_eq!(tree.get(&1).unwrap(), 20);
     ///
     /// // if we guess the wrong current value, a CasFailure is returned
     /// // which will tell us what the actual current value is (which we
     /// // failed to provide) and it will give us back our proposed new
     /// // value.
-    /// let cas_result = tree.cas(1, Some(&999999), Some(30));
+    /// let cas_result = tree.cas(1, Some(&999999_usize), Some(30));
     ///
     /// let expected_cas_failure = Err(concurrent_map::CasFailure {
     ///     actual: Some(20),
@@ -557,27 +556,26 @@ where
     /// assert_eq!(cas_result, expected_cas_failure);
     ///
     /// // conditionally delete
-    /// tree.cas(1, Some(&20), None).unwrap();
+    /// tree.cas(1, Some(&20_usize), None).unwrap();
     ///
     /// assert_eq!(tree.get(&1), None);
     /// ```
-    pub fn cas<OldValueRef: AsRef<V>>(
+    pub fn cas(
         &mut self,
         key: K,
-        old: Option<OldValueRef>,
+        old: Option<&V>,
         new: Option<V>,
     ) -> Result<Option<V>, CasFailure<V>>
     where
         V: PartialEq,
     {
-        let old_ref: Option<&V> = old.as_ref().map(|o| o.as_ref());
         loop {
             let mut guard = self.ebr.pin();
             let leaf = self
                 .inner
                 .leaf_for_key(&key, &self.idgen, &mut self.free_ids, &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
-            let ret = leaf_clone.cas(key.clone(), old_ref, new.clone());
+            let ret = leaf_clone.cas(key.clone(), old, new.clone());
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
             if install_attempt.is_ok() {
                 return ret;
