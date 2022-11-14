@@ -1169,14 +1169,8 @@ where
             }
 
             // go down the tree
-            let child_id = cursor
-                .index
-                .iter()
-                .filter(|(k, _v)| (..=&*key).contains(&&**k))
-                .next_back()
-                .unwrap()
-                .1;
-            //let child_id = *cursor.index.range::<K, _>(..=key).next_back().unwrap().1;
+            let child_id = cursor.index.index_next_child(key);
+
             parent_cursor_opt = Some(cursor);
             cursor = if let Some(view) = self.view_for_id(child_id, guard) {
                 view
@@ -1309,7 +1303,7 @@ where
         }
     }
 
-    fn should_merge(&self) -> bool {
+    const fn should_merge(&self) -> bool {
         if self.merging_child.is_some() || self.is_merging {
             return false;
         }
@@ -1320,7 +1314,7 @@ where
         }
     }
 
-    fn should_split(&self) -> bool {
+    const fn should_split(&self) -> bool {
         if self.merging_child.is_some() || self.is_merging {
             return false;
         }
@@ -1338,27 +1332,11 @@ where
         let split_idx = SPLIT_SIZE / 2;
 
         let (split_point, rhs_leaf, rhs_index) = if self.is_leaf {
-            let split_point = self
-                .leaf
-                .iter()
-                .map(|(k, _v)| k)
-                .nth(split_idx)
-                .unwrap()
-                .clone();
-
-            let rhs_leaf = self.leaf.split_off(&split_point);
+            let (split_point, rhs_leaf) = self.leaf.split_off(split_idx);
 
             (split_point, rhs_leaf, Default::default())
         } else {
-            let split_point = self
-                .index
-                .iter()
-                .map(|(k, _v)| k)
-                .nth(split_idx)
-                .unwrap()
-                .clone();
-
-            let rhs_index = self.index.split_off(&split_point);
+            let (split_point, rhs_index) = self.index.split_off(split_idx);
 
             (split_point, Default::default(), rhs_index)
         };
@@ -1476,11 +1454,12 @@ fn timing_tree() {
     );
 
     let scan = Instant::now();
-    for _ in tree.range(..) {}
+    let count = tree.range(..).count();
+    assert_eq!(count, n as _);
     let scan_elapsed = scan.elapsed();
     println!(
         "{} scanned items/s, total {:?}",
-        (n * 1000) / u64::try_from(scan_elapsed.as_millis()).unwrap_or(u64::MAX),
+        (n * 1000) / u64::try_from(scan_elapsed.as_millis().max(1)).unwrap_or(u64::MAX),
         scan_elapsed
     );
 
