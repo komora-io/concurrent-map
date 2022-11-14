@@ -17,8 +17,6 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> Drop for ArrayMap<K, V, FANO
     }
 }
 
-//impl<K: Copy, V: Copy> Copy for ArrayMap<K, V> {}
-
 impl<K: Clone + Ord, V: Clone, const FANOUT: usize> Clone for ArrayMap<K, V, FANOUT> {
     fn clone(&self) -> Self {
         let mut inner: [MaybeUninit<(K, V)>; FANOUT] =
