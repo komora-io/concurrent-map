@@ -35,20 +35,16 @@ impl<'a> Arbitrary<'a> for Op {
 }
 
 fuzz_target!(|ops: Vec<Op>| {
-    let mut tree = concurrent_map::ConcurrentMap::default();
+    let mut tree = concurrent_map::ConcurrentMap::<_, _, 8>::default();
     let mut model = std::collections::BTreeMap::new();
 
     for (_i, op) in ops.into_iter().enumerate() {
-        //println!("op {i}: {:?}", op);
         match op {
             Op::Insert { key, value } => {
-                assert_eq!(
-                    tree.insert(key, value).map(|arc| *arc),
-                    model.insert(key, value)
-                );
+                assert_eq!(tree.insert(key, value), model.insert(key, value));
             }
             Op::Remove { key } => {
-                assert_eq!(tree.remove(&key).map(|arc| *arc), model.remove(&key));
+                assert_eq!(tree.remove(&key), model.remove(&key));
             }
             Op::Range { start, end } => {
                 let mut model_iter = model.range(start..end);
@@ -56,7 +52,7 @@ fuzz_target!(|ops: Vec<Op>| {
 
                 for (k1, v1) in &mut model_iter {
                     let (k2, v2) = tree_iter.next().unwrap();
-                    assert_eq!((k1, v1), (&*k2, &*v2));
+                    assert_eq!((k1, v1), (&k2, &v2));
                 }
 
                 assert_eq!(tree_iter.next(), None);
@@ -64,7 +60,7 @@ fuzz_target!(|ops: Vec<Op>| {
         };
 
         for (key, value) in &model {
-            assert_eq!(tree.get(key).as_deref(), Some(value));
+            assert_eq!(tree.get(key), Some(*value));
         }
 
         /* TODO
@@ -79,7 +75,7 @@ fuzz_target!(|ops: Vec<Op>| {
 
     for (k1, v1) in &mut model_iter {
         let (k2, v2) = tree_iter.next().unwrap();
-        assert_eq!((k1, v1), (&*k2, &*v2));
+        assert_eq!((k1, v1), (&k2, &v2));
     }
 
     assert_eq!(tree_iter.next(), None);
