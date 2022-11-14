@@ -1,17 +1,12 @@
 use std::mem::MaybeUninit;
-use std::sync::Arc;
 
-// we must have enough space to merge a sibling into us
-const MAX_LEN: usize = super::SPLIT_SIZE + super::MERGE_SIZE;
-
-// TODO make it a const array
 #[derive(Debug)]
-pub struct ArrayMap<K: Ord, V> {
-    inner: [MaybeUninit<(Arc<K>, V)>; 16],
+pub struct ArrayMap<K: Clone + Ord, V: Clone, const FANOUT: usize> {
+    inner: [MaybeUninit<(K, V)>; FANOUT],
     len: u8,
 }
 
-impl<K: Ord, V> Drop for ArrayMap<K, V> {
+impl<K: Clone + Ord, V: Clone, const FANOUT: usize> Drop for ArrayMap<K, V, FANOUT> {
     fn drop(&mut self) {
         for i in 0..self.len() {
             let ptr = self.inner[i].as_mut_ptr();
@@ -22,9 +17,11 @@ impl<K: Ord, V> Drop for ArrayMap<K, V> {
     }
 }
 
-impl<K: Ord, V: Clone> Clone for ArrayMap<K, V> {
+//impl<K: Copy, V: Copy> Copy for ArrayMap<K, V> {}
+
+impl<K: Clone + Ord, V: Clone, const FANOUT: usize> Clone for ArrayMap<K, V, FANOUT> {
     fn clone(&self) -> Self {
-        let mut inner: [MaybeUninit<(Arc<K>, V)>; 16] =
+        let mut inner: [MaybeUninit<(K, V)>; FANOUT] =
             core::array::from_fn(|_i| MaybeUninit::uninit());
 
         for (i, item) in self.iter().cloned().enumerate() {
@@ -38,7 +35,7 @@ impl<K: Ord, V: Clone> Clone for ArrayMap<K, V> {
     }
 }
 
-impl<K: Ord, V> Default for ArrayMap<K, V> {
+impl<K: Clone + Ord, V: Clone, const FANOUT: usize> Default for ArrayMap<K, V, FANOUT> {
     fn default() -> Self {
         ArrayMap {
             inner: core::array::from_fn(|_i| MaybeUninit::uninit()),
@@ -47,10 +44,10 @@ impl<K: Ord, V> Default for ArrayMap<K, V> {
     }
 }
 
-impl<K: Ord, V> ArrayMap<K, V> {
+impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
     fn binary_search(&self, key: &K) -> Result<usize, usize> {
         self.inner[..self.len()]
-            .binary_search_by_key(&key, |slot| unsafe { &*slot.assume_init_ref().0 })
+            .binary_search_by_key(&key, |slot| unsafe { &slot.assume_init_ref().0 })
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
@@ -61,14 +58,14 @@ impl<K: Ord, V> ArrayMap<K, V> {
         }
     }
 
-    pub fn insert(&mut self, key: Arc<K>, value: V) -> Option<V> {
-        match self.binary_search(&*key) {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        match self.binary_search(&key) {
             Ok(index) => {
                 let slot = unsafe { &mut self.inner.get_unchecked_mut(index).assume_init_mut().1 };
                 Some(std::mem::replace(slot, value))
             }
             Err(index) => {
-                assert!(self.len() < MAX_LEN);
+                assert!(self.len() < FANOUT);
 
                 unsafe {
                     if index < self.len() {
@@ -114,17 +111,17 @@ impl<K: Ord, V> ArrayMap<K, V> {
 
     pub fn is_leftmost(&self, key: &K) -> bool {
         assert!(self.len > 0);
-        unsafe { &*self.inner[0].assume_init_ref().0 == key }
+        unsafe { &self.inner[0].assume_init_ref().0 == key }
     }
 
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &(Arc<K>, V)> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &(K, V)> {
         self.inner[..self.len()]
             .iter()
             .map(|slot| unsafe { slot.assume_init_ref() })
     }
 
     // returns the split key and the right hand split
-    pub fn split_off(&mut self, split_idx: usize) -> (Arc<K>, Self) {
+    pub fn split_off(&mut self, split_idx: usize) -> (K, Self) {
         assert!(split_idx < self.len());
 
         let split_key = unsafe { self.inner[split_idx].assume_init_ref().0.clone() };
@@ -145,7 +142,7 @@ impl<K: Ord, V> ArrayMap<K, V> {
         (split_key, rhs)
     }
 
-    pub fn get_index(&self, index: usize) -> Option<&(Arc<K>, V)> {
+    pub fn get_index(&self, index: usize) -> Option<&(K, V)> {
         if index < self.len() {
             Some(unsafe { self.inner.get_unchecked(index).assume_init_ref() })
         } else {
@@ -158,7 +155,7 @@ impl<K: Ord, V> ArrayMap<K, V> {
     }
 }
 
-impl<K: Ord, V: Copy> ArrayMap<K, V> {
+impl<K: Clone + Ord, V: Copy, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
     pub fn index_next_child(&self, key: &K) -> V {
         // binary_search_lub
         let index = match self.binary_search(key) {
