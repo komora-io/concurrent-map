@@ -291,23 +291,6 @@ impl Minimum for &str {
 
 /// A lock-free B+ tree.
 ///
-/// One thing that might seem strange compared to other
-/// concurrent structures in the Rust ecosystem, is that
-/// all of the methods require a mutable self reference.
-/// This is intentional, and stems from the fact that each
-/// [`ConcurrentMap`] object holds a fully-owned local
-/// garbage bag for epoch-based reclamation, backed by
-/// the [`ebr`] crate. Epoch-based reclamation is at the heart
-/// of the concurrent Rust ecosystem, but existing popular
-/// implementations tend to incur significant overhead due
-/// to an over-reliance on shared state. This crate (and
-/// the backing [`ebr`] crate) takes a different approach.
-/// It may seem unfamiliar, but it allows for far higher
-/// efficiency, and this approach may become more prevalent
-/// over time as more people realize that this is how to
-/// make one of the core aspects underlying many of our
-/// concurrent data structures to be made more efficient.
-///
 /// If you want to use a custom key type, you must
 /// implement the [`Minimum`] trait,
 /// allowing the left-most side of the tree to be
@@ -434,23 +417,23 @@ where
     V: 'static + Clone + fmt::Debug + Send + Sync,
 {
     /// Atomically get a value out of the tree that is associated with this key.
-    pub fn get(&mut self, key: &K) -> Option<V> {
+    pub fn get(&self, key: &K) -> Option<V> {
         let mut guard = self.ebr.pin();
 
         let leaf = self
             .inner
-            .leaf_for_key(key, &self.idgen, &mut self.free_ids, &mut guard);
+            .leaf_for_key(key, &self.idgen, &self.free_ids, &mut guard);
 
         leaf.get(key)
     }
 
     /// Atomically insert a key-value pair into the tree, returning the previous value associated with this key if one existed.
-    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+    pub fn insert(&self, key: K, value: V) -> Option<V> {
         loop {
             let mut guard = self.ebr.pin();
             let leaf = self
                 .inner
-                .leaf_for_key(&key, &self.idgen, &mut self.free_ids, &mut guard);
+                .leaf_for_key(&key, &self.idgen, &self.free_ids, &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             assert!(
                 leaf_clone.len() < (FANOUT - MERGE_SIZE),
@@ -503,12 +486,12 @@ where
     }
 
     /// Atomically remove the value associated with this key from the tree, returning the previous value if one existed.
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    pub fn remove(&self, key: &K) -> Option<V> {
         loop {
             let mut guard = self.ebr.pin();
             let leaf = self
                 .inner
-                .leaf_for_key(key, &self.idgen, &mut self.free_ids, &mut guard);
+                .leaf_for_key(key, &self.idgen, &self.free_ids, &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.remove(key);
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
@@ -527,7 +510,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// let mut tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
     /// // key 1 does not yet exist
     /// assert_eq!(tree.get(&1), None);
@@ -560,12 +543,7 @@ where
     ///
     /// assert_eq!(tree.get(&1), None);
     /// ```
-    pub fn cas(
-        &mut self,
-        key: K,
-        old: Option<&V>,
-        new: Option<V>,
-    ) -> Result<Option<V>, CasFailure<V>>
+    pub fn cas(&self, key: K, old: Option<&V>, new: Option<V>) -> Result<Option<V>, CasFailure<V>>
     where
         V: PartialEq,
     {
@@ -573,7 +551,7 @@ where
             let mut guard = self.ebr.pin();
             let leaf = self
                 .inner
-                .leaf_for_key(&key, &self.idgen, &mut self.free_ids, &mut guard);
+                .leaf_for_key(&key, &self.idgen, &self.free_ids, &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.cas(key.clone(), old, new.clone());
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
@@ -598,18 +576,18 @@ where
     ///
     /// But, you can be certain that any key that existed prior to the creation of this
     /// iterator, and was not changed during iteration, will be observed as expected.
-    pub fn iter(&mut self) -> Iter<'_, K, V, FANOUT> {
+    pub fn iter(&self) -> Iter<'_, K, V, FANOUT> {
         let mut guard = self.ebr.pin();
 
         let current =
             self.inner
-                .leaf_for_key(&K::minimum(), &self.idgen, &mut self.free_ids, &mut guard);
+                .leaf_for_key(&K::minimum(), &self.idgen, &self.free_ids, &mut guard);
 
         Iter {
             guard,
             inner: &self.inner,
             idgen: &self.idgen,
-            free_ids: &mut self.free_ids,
+            free_ids: &self.free_ids,
             current,
             range: std::ops::RangeFull,
             next_index: 0,
@@ -631,7 +609,7 @@ where
     ///
     /// But, you can be certain that any key that existed prior to the creation of this
     /// iterator, and was not changed during iteration, will be observed as expected.
-    pub fn range<R: std::ops::RangeBounds<K>>(&mut self, range: R) -> Iter<'_, K, V, FANOUT, R> {
+    pub fn range<R: std::ops::RangeBounds<K>>(&self, range: R) -> Iter<'_, K, V, FANOUT, R> {
         let mut guard = self.ebr.pin();
 
         #[allow(unused)]
@@ -646,7 +624,7 @@ where
 
         let current = self
             .inner
-            .leaf_for_key(start, &self.idgen, &mut self.free_ids, &mut guard);
+            .leaf_for_key(start, &self.idgen, &self.free_ids, &mut guard);
 
         let next_index = current
             .leaf()
@@ -658,7 +636,7 @@ where
             guard,
             inner: &self.inner,
             idgen: &self.idgen,
-            free_ids: &mut self.free_ids,
+            free_ids: &self.free_ids,
             current,
             range,
             next_index,
@@ -675,7 +653,7 @@ where
 {
     inner: &'a Inner<K, V, FANOUT>,
     idgen: &'a AtomicU64,
-    free_ids: &'a mut Stack<u64>,
+    free_ids: &'a Stack<u64>,
     guard: Guard<'a, Deferred<K, V, FANOUT>>,
     range: R,
     current: NodeView<'a, K, V, FANOUT>,
@@ -813,7 +791,7 @@ where
         parent: &mut NodeView<'a, K, V, FANOUT>,
         child: &mut NodeView<'a, K, V, FANOUT>,
         idgen: &AtomicU64,
-        free_ids: &mut Stack<u64>,
+        free_ids: &Stack<u64>,
         guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
     ) {
         // 2. mark child as merging
@@ -1049,7 +1027,7 @@ where
         &'a self,
         key: &K,
         idgen: &AtomicU64,
-        free_ids: &mut Stack<u64>,
+        free_ids: &Stack<u64>,
         guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
     ) -> NodeView<'a, K, V, FANOUT> {
         // println!("looking for key {key:?}");
@@ -1478,7 +1456,7 @@ where
 
 #[test]
 fn basic_tree() {
-    let mut tree = ConcurrentMap::<usize, usize>::default();
+    let tree = ConcurrentMap::<usize, usize>::default();
 
     let n = 64; // SPLIT_SIZE
     for i in 0..n {
@@ -1516,7 +1494,7 @@ fn basic_tree() {
 fn timing_tree() {
     use std::time::Instant;
 
-    let mut tree = ConcurrentMap::<u64, u64>::default();
+    let tree = ConcurrentMap::<u64, u64>::default();
 
     let n = 1024 * 1024;
 
@@ -1561,7 +1539,7 @@ fn concurrent_tree() {
         .unwrap_or(8)
         * 2;
 
-    let run = |mut tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bits| {
+    let run = |tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bits| {
         let shift = concurrency.next_power_of_two().trailing_zeros();
         let unique_key = |key| (key << shift) | low_bits;
 
@@ -1620,7 +1598,7 @@ fn billion_scan() {
     let stride = n / concurrency;
 
     let fill =
-        |mut tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier, start_fill, stop_fill| {
+        |tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier, start_fill, stop_fill| {
             barrier.wait();
             let insert = std::time::Instant::now();
             for i in start_fill..stop_fill {
@@ -1635,7 +1613,7 @@ fn billion_scan() {
             );
         };
 
-    let read = |mut tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier| {
+    let read = |tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier| {
         barrier.wait();
         let scan = std::time::Instant::now();
         let count = tree.range(..).take(stride as _).count();

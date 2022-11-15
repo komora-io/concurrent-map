@@ -118,7 +118,7 @@ impl<T: Send> Stack<T> {
         }
     }
 
-    pub fn pop(&mut self) -> Option<T> {
+    pub fn pop(&self) -> Option<T> {
         let mut guard = self.ebr.pin();
 
         let mut cursor = self.head.load(Ordering::Acquire);
@@ -160,7 +160,7 @@ impl<T: Send> Stack<T> {
 fn basic_stack() {
     const N: usize = 128;
 
-    let mut stack = Stack::<String>::default();
+    let stack = Stack::<String>::default();
     for _ in 0..N {
         stack.push("yo".into());
     }
