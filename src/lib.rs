@@ -400,7 +400,7 @@ where
         #[cfg(feature = "timing")]
         self.print_timing();
 
-        let mut ebr = Ebr::default();
+        let ebr = Ebr::default();
         let mut guard = ebr.pin();
 
         let mut cursor = self.root(&mut guard);

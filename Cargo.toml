@@ -18,5 +18,5 @@ timing = []
 fuzz_constants = []
 
 [dependencies]
-ebr = "0.0.5"
+ebr = "0.1.39"
 pagetable = "0.3"
