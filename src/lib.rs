@@ -291,6 +291,14 @@ impl Minimum for &str {
 
 /// A lock-free B+ tree.
 ///
+/// Note that this structure is `Send` but NOT `Sync`,
+/// despite being a lock-free tree. This is because the
+/// inner reclamation system, provided by the `ebr` crate
+/// completely avoids atomic operations in its hot path
+/// for efficiency. If you want to share [`ConcurrentMap`]
+/// between threads, simply clone it, and this will set up
+/// a new efficient thread-local memory reclamation state.
+///
 /// If you want to use a custom key type, you must
 /// implement the [`Minimum`] trait,
 /// allowing the left-most side of the tree to be
@@ -1452,6 +1460,13 @@ where
         }
         self.lo <= possible_child.lo
     }
+}
+
+fn _test_impls() {
+    fn send<T: Send>() {}
+    fn clone<T: Clone>() {}
+    send::<ConcurrentMap<usize, usize>>();
+    clone::<ConcurrentMap<usize, usize>>();
 }
 
 #[test]
