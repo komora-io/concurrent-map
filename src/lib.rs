@@ -74,6 +74,24 @@
     )
 )]
 
+//! A lock-free B+ tree based on [sled](https://github.com/spacejam/sled)'s internal
+//! index structure, but supporting richer Rust types as keys and values than raw bytes.
+//!
+//! This structure supports atomic compare and swap operations with the
+//! [`ConcurrentMap::cas`] method.
+//!
+//! The [`ConcurrentMap`] allows users to tune the tree fan-out (`FANOUT`)
+//! and the underlying memory reclamation granularity (`LOCAL_GC_BUFFER_SIZE`)
+//! for achieving desired performance properties. The defaults are pretty good
+//! for most use cases but if you want to squeeze every bit of performance out
+//! for your particular workload, tweaking them based on realistic measurements
+//! may be beneficial. See the [`ConcurrentMap`] docs for more details.
+//!
+//! This is an ordered data structure, and supports very high throughput iteration over
+//! lexicographically sorted ranges of values. If you are looking for simple point operation
+//! performance, you may find a better option among one of the many concurrent
+//! hashmap implementatinos that are floating around.
+
 mod array_map;
 mod stack;
 
@@ -149,10 +167,10 @@ where
 {
     /// Try to replace. If the node has been deleted since we got our view,
     /// an Err(None) is returned.
-    fn cas(
+    fn cas<const LOCAL_GC_BUFFER_SIZE: usize>(
         &self,
         replacement: Box<Node<K, V, FANOUT>>,
-        guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
+        guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> Result<NodeView<'a, K, V, FANOUT>, Option<NodeView<'a, K, V, FANOUT>>> {
         // println!("replacing:");
         // println!("nodeview:     {:?}", *self);
@@ -303,14 +321,33 @@ impl Minimum for &str {
 /// implement the [`Minimum`] trait,
 /// allowing the left-most side of the tree to be
 /// created before inserting any data.
+///
+/// The `FANOUT` const generic must be greater than 3.
+/// This const generic controls how large the fixed-size
+/// array for either child pointers (for index nodes) or
+/// values (for leaf nodes) will be. A higher value may
+/// make reads and scans faster, but writes will be slower
+/// because each modification performs a read-copy-update
+/// of the full node. In some cases, it may be preferable
+/// to wrap complex values in an `Arc` to avoid higher
+/// copy costs.
+///
+/// The `LOCAL_GC_BUFFER_SIZE` const generic must be greater than 0.
+/// This controls the epoch-based reclamation granularity.
+/// Garbage is placed into fixed-size arrays, and garbage collection
+/// only happens after this array fills up and a final timestamp is
+/// assigned to it. Lower values will cause replaced values to be dropped
+/// more quickly, but the efficiency will be lower. Values that are
+/// extremely high may cause undesirable memory usage because it will
+/// take more time to fill up each thread-local garbage segment.
 #[derive(Clone)]
-pub struct ConcurrentMap<K, V, const FANOUT: usize = 64>
+pub struct ConcurrentMap<K, V, const FANOUT: usize = 64, const LOCAL_GC_BUFFER_SIZE: usize = 128>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
 {
     // epoch-based reclamation
-    ebr: Ebr<Deferred<K, V, FANOUT>>,
+    ebr: Ebr<Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     // new node id generator
     idgen: Arc<AtomicU64>,
     // store freed node ids for reuse here
@@ -319,15 +356,21 @@ where
     // types so that we can mix mutable references
     // to ebr with immutable references to other
     // things.
-    inner: Arc<Inner<K, V, FANOUT>>,
+    inner: Arc<Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>>,
 }
 
-impl<K, V, const FANOUT: usize> Default for ConcurrentMap<K, V, FANOUT>
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> Default
+    for ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
 {
-    fn default() -> ConcurrentMap<K, V, FANOUT> {
+    fn default() -> ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE> {
+        assert!(FANOUT > 3, "ConcurrentMap FANOUT must be greater than 3");
+        assert!(
+            LOCAL_GC_BUFFER_SIZE > 0,
+            "LOCAL_GC_BUFFER_SIZE must be greater than 0"
+        );
         let initial_root_id = 1;
         let initial_leaf_id = 2;
 
@@ -369,7 +412,7 @@ where
 }
 
 #[derive(Default)]
-struct Inner<K, V, const FANOUT: usize>
+struct Inner<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
@@ -382,7 +425,8 @@ where
     fastest_op: AtomicU64,
 }
 
-impl<K, V, const FANOUT: usize> Drop for Inner<K, V, FANOUT>
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> Drop
+    for Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
@@ -419,7 +463,8 @@ where
     }
 }
 
-impl<K, V, const FANOUT: usize> ConcurrentMap<K, V, FANOUT>
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
+    ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
@@ -584,7 +629,7 @@ where
     ///
     /// But, you can be certain that any key that existed prior to the creation of this
     /// iterator, and was not changed during iteration, will be observed as expected.
-    pub fn iter(&self) -> Iter<'_, K, V, FANOUT> {
+    pub fn iter(&self) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE> {
         let mut guard = self.ebr.pin();
 
         let current =
@@ -617,7 +662,10 @@ where
     ///
     /// But, you can be certain that any key that existed prior to the creation of this
     /// iterator, and was not changed during iteration, will be observed as expected.
-    pub fn range<R: std::ops::RangeBounds<K>>(&self, range: R) -> Iter<'_, K, V, FANOUT, R> {
+    pub fn range<R: std::ops::RangeBounds<K>>(
+        &self,
+        range: R,
+    ) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R> {
         let mut guard = self.ebr.pin();
 
         #[allow(unused)]
@@ -653,22 +701,29 @@ where
 }
 
 /// An iterator over a [`ConcurrentMap`].
-pub struct Iter<'a, K, V, const FANOUT: usize, R = std::ops::RangeFull>
-where
+pub struct Iter<
+    'a,
+    K,
+    V,
+    const FANOUT: usize,
+    const LOCAL_GC_BUFFER_SIZE: usize,
+    R = std::ops::RangeFull,
+> where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
     R: std::ops::RangeBounds<K>,
 {
-    inner: &'a Inner<K, V, FANOUT>,
+    inner: &'a Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>,
     idgen: &'a AtomicU64,
     free_ids: &'a Stack<u64>,
-    guard: Guard<'a, Deferred<K, V, FANOUT>>,
+    guard: Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     range: R,
     current: NodeView<'a, K, V, FANOUT>,
     next_index: usize,
 }
 
-impl<'a, K, V, const FANOUT: usize, R> Iterator for Iter<'a, K, V, FANOUT, R>
+impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> Iterator
+    for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
@@ -717,7 +772,8 @@ where
     }
 }
 
-impl<K, V, const FANOUT: usize> Inner<K, V, FANOUT>
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
+    Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
     K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
     V: 'static + Clone + fmt::Debug + Send + Sync,
@@ -725,7 +781,7 @@ where
     fn view_for_id<'a>(
         &'a self,
         id: Id,
-        _guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
+        _guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> Option<NodeView<'a, K, V, FANOUT>> {
         let slot = self.table.get(id);
         let ptr = NonNull::new(slot.load(Ordering::Acquire))?;
@@ -735,7 +791,7 @@ where
 
     fn root<'a>(
         &'a self,
-        guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
+        guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> NodeView<'a, K, V, FANOUT> {
         loop {
             let root_id = self.root_id.load(Ordering::Acquire);
@@ -768,7 +824,7 @@ where
         &'a self,
         parent: &NodeView<'a, K, V, FANOUT>,
         child: &NodeView<'a, K, V, FANOUT>,
-        guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
+        guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> Result<NodeView<'a, K, V, FANOUT>, ()> {
         // 1. try to mark the parent's merging_child
         //  a. must not be the left-most child
@@ -800,7 +856,7 @@ where
         child: &mut NodeView<'a, K, V, FANOUT>,
         idgen: &AtomicU64,
         free_ids: &Stack<u64>,
-        guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
+        guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) {
         // 2. mark child as merging
         while !child.is_merging {
@@ -1036,7 +1092,7 @@ where
         key: &K,
         idgen: &AtomicU64,
         free_ids: &Stack<u64>,
-        guard: &mut Guard<'a, Deferred<K, V, FANOUT>>,
+        guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> NodeView<'a, K, V, FANOUT> {
         // println!("looking for key {key:?}");
         let mut parent_cursor_opt: Option<NodeView<'a, K, V, FANOUT>> = None;
@@ -1359,6 +1415,10 @@ where
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
 
+        // anything that should be split should have been split
+        // prior to becoming globally visible via this codepath.
+        assert!(!self.should_split());
+
         match (old, self.leaf().get(&key)) {
             (expected, actual) if expected == actual => {
                 if let Some(to_insert) = new {
@@ -1607,7 +1667,7 @@ fn concurrent_tree() {
 }
 
 #[test]
-fn billion_scan() {
+fn big_scan() {
     let n: u32 = 16 * 1024 * 1024;
     let concurrency = 8;
     let stride = n / concurrency;
