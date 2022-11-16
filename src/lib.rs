@@ -235,21 +235,32 @@ where
 pub trait Minimum: Ord {
     /// The returned value must be less than or equal
     /// to all possible values for this type.
-    fn minimum() -> Self;
+    const MIN: Self;
+}
+
+/// Trait for types for which a maximum possible value exists.
+///
+/// This exists primarily to play nicely with `std::cmp::Reverse<T>` keys
+/// for achieving high performance reverse iteration.
+pub trait Maximum: Ord {
+    /// The returned value must be greater than or equal
+    /// to all possible values for this type.
+    const MAX: Self;
 }
 
 impl Minimum for () {
-    fn minimum() -> Self {}
+    const MIN: Self = ();
+}
+
+impl<T: Maximum> Minimum for std::cmp::Reverse<T> {
+    const MIN: Self = std::cmp::Reverse(T::MAX);
 }
 
 macro_rules! impl_min {
     ($($t:ty),+) => {
         $(
             impl Minimum for $t {
-                #[inline]
-                fn minimum() -> Self {
-                    <$t>::MIN
-                }
+                const MIN: Self = <$t>::MIN;
             }
         )*
     }
@@ -257,54 +268,20 @@ macro_rules! impl_min {
 
 impl_min!(usize, u8, u16, u32, u64, u128, isize, i8, i16, i32, i64, i128);
 
-macro_rules! impl_collection_default {
-    ($($t:ty),+) => {
-        $(
-            impl<T: Ord> Minimum for $t {
-                #[inline]
-                fn minimum() -> Self {
-                    <$t>::default()
-                }
-            }
-        )*
-    }
-}
-
-impl_collection_default!(
-    Vec<T>,
-    std::collections::VecDeque<T>,
-    std::collections::BTreeSet<T>,
-    std::collections::LinkedList<T>
-);
-
 impl<T: Ord> Minimum for &[T] {
-    fn minimum() -> Self {
-        &[]
-    }
+    const MIN: Self = &[];
 }
 
 impl<T: Minimum, const LEN: usize> Minimum for [T; LEN] {
-    fn minimum() -> Self {
-        core::array::from_fn(|_i| T::minimum())
-    }
-}
-
-impl<T: Minimum> Minimum for Box<T> {
-    fn minimum() -> Self {
-        Box::new(T::minimum())
-    }
+    const MIN: Self = [T::MIN; LEN];
 }
 
 impl Minimum for String {
-    fn minimum() -> Self {
-        String::new()
-    }
+    const MIN: Self = String::new();
 }
 
 impl Minimum for &str {
-    fn minimum() -> Self {
-        ""
-    }
+    const MIN: Self = "";
 }
 
 /// A lock-free B+ tree.
@@ -632,9 +609,9 @@ where
     pub fn iter(&self) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE> {
         let mut guard = self.ebr.pin();
 
-        let current =
-            self.inner
-                .leaf_for_key(&K::minimum(), &self.idgen, &self.free_ids, &mut guard);
+        let current = self
+            .inner
+            .leaf_for_key(&K::MIN, &self.idgen, &self.free_ids, &mut guard);
 
         Iter {
             guard,
@@ -672,7 +649,7 @@ where
         let mut min = None;
         let start = match range.start_bound() {
             std::ops::Bound::Unbounded => {
-                min = Some(K::minimum());
+                min = Some(K::MIN);
                 min.as_ref().unwrap()
             }
             std::ops::Bound::Included(k) | std::ops::Bound::Excluded(k) => k,
@@ -1358,7 +1335,7 @@ where
     }
 
     fn new_root() -> Box<Node<K, V, FANOUT>> {
-        let min_key = K::minimum();
+        let min_key = K::MIN;
         Box::new(Node {
             lo: min_key,
             hi: None,

@@ -35,7 +35,7 @@ impl<'a> Arbitrary<'a> for Op {
 }
 
 fuzz_target!(|ops: Vec<Op>| {
-    let mut tree = concurrent_map::ConcurrentMap::<_, _, 8>::default();
+    let tree = concurrent_map::ConcurrentMap::<_, _, 8>::default();
     let mut model = std::collections::BTreeMap::new();
 
     for (_i, op) in ops.into_iter().enumerate() {
