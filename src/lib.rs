@@ -1527,6 +1527,20 @@ where
     }
 }
 
+impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> IntoIterator
+    for &'a ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
+where
+    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + fmt::Debug + Send + Sync,
+{
+    type Item = (K, V);
+    type IntoIter = Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, std::ops::RangeFull>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 fn _test_impls() {
     fn send<T: Send>() {}
     fn clone<T: Clone>() {}
