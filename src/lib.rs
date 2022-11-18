@@ -98,6 +98,7 @@ mod stack;
 use array_map::ArrayMap;
 use stack::{Pusher, Stack};
 
+use std::borrow::Borrow;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::ops::Deref;
@@ -447,7 +448,11 @@ where
     V: 'static + Clone + fmt::Debug + Send + Sync,
 {
     /// Atomically get a value out of the tree that is associated with this key.
-    pub fn get(&self, key: &K) -> Option<V> {
+    pub fn get<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         let mut guard = self.ebr.pin();
 
         let leaf = self
@@ -516,7 +521,11 @@ where
     }
 
     /// Atomically remove the value associated with this key from the tree, returning the previous value if one existed.
-    pub fn remove(&self, key: &K) -> Option<V> {
+    pub fn remove<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         loop {
             let mut guard = self.ebr.pin();
             let leaf = self
@@ -573,9 +582,15 @@ where
     ///
     /// assert_eq!(tree.get(&1), None);
     /// ```
-    pub fn cas(&self, key: K, old: Option<&V>, new: Option<V>) -> Result<Option<V>, CasFailure<V>>
+    pub fn cas<VRef>(
+        &self,
+        key: K,
+        old: Option<&VRef>,
+        new: Option<V>,
+    ) -> Result<Option<V>, CasFailure<V>>
     where
-        V: PartialEq,
+        V: Borrow<VRef>,
+        VRef: PartialEq + ?Sized,
     {
         loop {
             let mut guard = self.ebr.pin();
@@ -1064,13 +1079,17 @@ where
         }
     }
 
-    fn leaf_for_key<'a>(
+    fn leaf_for_key<'a, Q>(
         &'a self,
-        key: &K,
+        key: &Q,
         idgen: &AtomicU64,
         free_ids: &Stack<u64>,
         guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
-    ) -> NodeView<'a, K, V, FANOUT> {
+    ) -> NodeView<'a, K, V, FANOUT>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         // println!("looking for key {key:?}");
         let mut parent_cursor_opt: Option<NodeView<'a, K, V, FANOUT>> = None;
         let mut cursor = self.root(guard);
@@ -1127,9 +1146,9 @@ where
                 }
             }
 
-            assert!(key >= &cursor.lo);
+            assert!(key >= cursor.lo.borrow());
             if let Some(hi) = &cursor.hi {
-                if key >= hi {
+                if key >= hi.borrow() {
                     // go right to the tree sibling
                     let next = cursor.next.unwrap();
                     let rhs = if let Some(view) = self.view_for_id(next.get(), guard) {
@@ -1226,9 +1245,9 @@ where
             if cursor.is_leaf() {
                 assert!(!cursor.is_merging);
                 assert!(cursor.merging_child.is_none());
-                assert!(cursor.lo <= *key);
+                assert!(cursor.lo.borrow() <= key);
                 if let Some(ref hi) = cursor.hi {
-                    assert!(*hi > *key);
+                    assert!(hi.borrow() > key);
                 }
                 break;
             }
@@ -1357,7 +1376,11 @@ where
         })
     }
 
-    fn get(&self, key: &K) -> Option<V> {
+    fn get<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
         assert!(self.is_leaf());
@@ -1365,7 +1388,11 @@ where
         self.leaf().get(key).cloned()
     }
 
-    fn remove(&mut self, key: &K) -> Option<V> {
+    fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
 
@@ -1380,14 +1407,15 @@ where
         self.leaf_mut().insert(key, value)
     }
 
-    pub fn cas(
+    fn cas<V2>(
         &mut self,
         key: K,
-        old: Option<&V>,
+        old: Option<&V2>,
         new: Option<V>,
     ) -> Result<Option<V>, CasFailure<V>>
     where
-        V: PartialEq,
+        V: Borrow<V2>,
+        V2: ?Sized + PartialEq,
     {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
@@ -1397,7 +1425,7 @@ where
         assert!(!self.should_split());
 
         match (old, self.leaf().get(&key)) {
-            (expected, actual) if expected == actual => {
+            (expected, actual) if expected == actual.map(Borrow::borrow) => {
                 if let Some(to_insert) = new {
                     Ok(self.leaf_mut().insert(key, to_insert))
                 } else {

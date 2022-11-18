@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::mem::MaybeUninit;
 
 #[derive(Debug)]
@@ -43,12 +44,20 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> Default for ArrayMap<K, V, F
 }
 
 impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
-    fn binary_search(&self, key: &K) -> Result<usize, usize> {
+    fn binary_search<Q>(&self, key: &Q) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         self.inner[..self.len()]
-            .binary_search_by_key(&key, |slot| unsafe { &slot.assume_init_ref().0 })
+            .binary_search_by_key(&key, |slot| unsafe { &slot.assume_init_ref().0.borrow() })
     }
 
-    pub fn get(&self, key: &K) -> Option<&V> {
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         if let Ok(index) = self.binary_search(key) {
             Some(unsafe { &self.inner.get_unchecked(index).assume_init_ref().1 })
         } else {
@@ -82,7 +91,11 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
         }
     }
 
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         if let Ok(index) = self.binary_search(key) {
             unsafe {
                 let ret = std::ptr::read(self.inner.get_unchecked(index).as_ptr()).1;
@@ -154,7 +167,11 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
 }
 
 impl<K: Clone + Ord, V: Copy, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
-    pub fn index_next_child(&self, key: &K) -> V {
+    pub fn index_next_child<Q>(&self, key: &Q) -> V
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         // binary_search_lub
         let index = match self.binary_search(key) {
             Ok(i) => i,
