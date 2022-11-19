@@ -87,6 +87,14 @@
 //! for your particular workload, tweaking them based on realistic measurements
 //! may be beneficial. See the [`ConcurrentMap`] docs for more details.
 //!
+//! If you want to use a custom key type, you must
+//! implement the [`Minimum`] trait,
+//! allowing the left-most side of the tree to be
+//! created before inserting any data. If you wish
+//! to perform scans in reverse lexicographical order,
+//! you may instead implement [`Maximum`] for your key
+//! type and use [`std::cmp::Reverse`].
+//!
 //! This is an ordered data structure, and supports very high throughput iteration over
 //! lexicographically sorted ranges of values. If you are looking for simple point operation
 //! performance, you may find a better option among one of the many concurrent
@@ -241,7 +249,7 @@ pub trait Minimum: Ord {
 
 /// Trait for types for which a maximum possible value exists.
 ///
-/// This exists primarily to play nicely with `std::cmp::Reverse<T>` keys
+/// This exists primarily to play nicely with [`std::cmp::Reverse`] keys
 /// for achieving high performance reverse iteration.
 pub trait Maximum: Ord {
     /// The returned value must be greater than or equal
@@ -257,17 +265,21 @@ impl<T: Maximum> Minimum for std::cmp::Reverse<T> {
     const MIN: Self = std::cmp::Reverse(T::MAX);
 }
 
-macro_rules! impl_min {
+macro_rules! impl_integer {
     ($($t:ty),+) => {
         $(
             impl Minimum for $t {
                 const MIN: Self = <$t>::MIN;
             }
+
+            impl Maximum for $t {
+                const MAX: Self = <$t>::MAX;
+            }
         )*
     }
 }
 
-impl_min!(usize, u8, u16, u32, u64, u128, isize, i8, i16, i32, i64, i128);
+impl_integer!(usize, u8, u16, u32, u64, u128, isize, i8, i16, i32, i64, i128);
 
 impl<T: Ord> Minimum for &[T] {
     const MIN: Self = &[];
@@ -298,7 +310,10 @@ impl Minimum for &str {
 /// If you want to use a custom key type, you must
 /// implement the [`Minimum`] trait,
 /// allowing the left-most side of the tree to be
-/// created before inserting any data.
+/// created before inserting any data. If you wish
+/// to perform scans in reverse lexicographical order,
+/// you may instead implement [`Maximum`] for your key
+/// type and use [`std::cmp::Reverse`].
 ///
 /// The `FANOUT` const generic must be greater than 3.
 /// This const generic controls how large the fixed-size
