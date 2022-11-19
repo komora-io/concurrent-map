@@ -139,8 +139,8 @@ pub struct CasFailure<V> {
 
 enum Deferred<K, V, const FANOUT: usize>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     DropNode(Box<Node<K, V, FANOUT>>),
     MarkIdReusable { stack: Pusher<u64>, id: Id },
@@ -148,8 +148,8 @@ where
 
 impl<K, V, const FANOUT: usize> Drop for Deferred<K, V, FANOUT>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     fn drop(&mut self) {
         if let Deferred::MarkIdReusable { stack, id } = self {
@@ -161,8 +161,8 @@ where
 #[derive(Debug)]
 struct NodeView<'a, K, V, const FANOUT: usize>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     ptr: NonNull<Node<K, V, FANOUT>>,
     slot: &'a AtomicPtr<Node<K, V, FANOUT>>,
@@ -171,8 +171,8 @@ where
 
 impl<'a, K, V, const FANOUT: usize> NodeView<'a, K, V, FANOUT>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     /// Try to replace. If the node has been deleted since we got our view,
     /// an Err(None) is returned.
@@ -228,8 +228,8 @@ where
 
 impl<'a, K, V, const FANOUT: usize> Deref for NodeView<'a, K, V, FANOUT>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     type Target = Node<K, V, FANOUT>;
 
@@ -336,8 +336,8 @@ impl Minimum for &str {
 #[derive(Clone)]
 pub struct ConcurrentMap<K, V, const FANOUT: usize = 64, const LOCAL_GC_BUFFER_SIZE: usize = 128>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     // epoch-based reclamation
     ebr: Ebr<Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
@@ -352,11 +352,23 @@ where
     inner: Arc<Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>>,
 }
 
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> fmt::Debug
+    for ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
+where
+    K: 'static + fmt::Debug + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + fmt::Debug + Clone + Send + Sync,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ConcurrentMap ")?;
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> Default
     for ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     fn default() -> ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE> {
         assert!(FANOUT > 3, "ConcurrentMap FANOUT must be greater than 3");
@@ -407,8 +419,8 @@ where
 #[derive(Default)]
 struct Inner<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     root_id: AtomicU64,
     table: PageTable<AtomicPtr<Node<K, V, FANOUT>>>,
@@ -421,8 +433,8 @@ where
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> Drop
     for Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     fn drop(&mut self) {
         #[cfg(feature = "timing")]
@@ -459,8 +471,8 @@ where
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
     ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     /// Atomically get a value out of the tree that is associated with this key.
     pub fn get<Q>(&self, key: &Q) -> Option<V>
@@ -487,9 +499,8 @@ where
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             assert!(
                 leaf_clone.len() < (FANOUT - MERGE_SIZE),
-                "bad leaf: should split: {},  {:?}",
+                "bad leaf: should split: {}",
                 leaf_clone.should_split(),
-                *leaf_clone
             );
             let ret = leaf_clone.insert(key.clone(), value.clone());
 
@@ -752,8 +763,8 @@ pub struct Iter<
     const LOCAL_GC_BUFFER_SIZE: usize,
     R = std::ops::RangeFull,
 > where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
     R: std::ops::RangeBounds<K>,
 {
     inner: &'a Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>,
@@ -768,8 +779,8 @@ pub struct Iter<
 impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> Iterator
     for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
     R: std::ops::RangeBounds<K>,
 {
     type Item = (K, V);
@@ -802,10 +813,7 @@ where
                             .leaf_for_key(hi, self.idgen, self.free_ids, &mut self.guard);
                     self.next_index = 0;
                 } else {
-                    panic!(
-                        "somehow hit a node that has a next but not a hi key: {:?}",
-                        self.current
-                    );
+                    panic!("somehow hit a node that has a next but not a hi key");
                 }
             } else {
                 // end of the collection
@@ -818,8 +826,8 @@ where
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
     Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     fn view_for_id<'a>(
         &'a self,
@@ -1325,8 +1333,8 @@ where
 #[derive(Debug, Clone)]
 enum Data<K, V, const FANOUT: usize>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     Leaf(ArrayMap<K, V, FANOUT>),
     Index(ArrayMap<K, Id, FANOUT>),
@@ -1335,8 +1343,8 @@ where
 #[derive(Debug)]
 struct Node<K, V, const FANOUT: usize>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     next: Option<NonZeroU64>,
     merging_child: Option<NonZeroU64>,
@@ -1348,8 +1356,8 @@ where
 
 impl<K, V, const FANOUT: usize> Clone for Node<K, V, FANOUT>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     fn clone(&self) -> Node<K, V, FANOUT> {
         Node {
@@ -1365,8 +1373,8 @@ where
 
 impl<K, V, const FANOUT: usize> Node<K, V, FANOUT>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     const fn index(&self) -> &ArrayMap<K, Id, FANOUT> {
         if let Data::Index(ref index) = self.data {
@@ -1540,7 +1548,7 @@ where
             is_merging: false,
         };
 
-        assert_eq!(self.hi, Some(split_point));
+        assert!(self.hi == Some(split_point));
 
         (self, rhs)
     }
@@ -1581,8 +1589,8 @@ where
 impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> IntoIterator
     for &'a ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
-    K: 'static + Clone + fmt::Debug + Minimum + Ord + Send + Sync,
-    V: 'static + Clone + fmt::Debug + Send + Sync,
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     type Item = (K, V);
     type IntoIter = Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, std::ops::RangeFull>;
