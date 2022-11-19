@@ -10,9 +10,22 @@ const KEYSPACE: u64 = 128;
 
 #[derive(Debug)]
 enum Op {
-    Insert { key: u64, value: u64 },
-    Remove { key: u64 },
-    Range { start: u64, end: u64 },
+    Insert {
+        key: u64,
+        value: u64,
+    },
+    Remove {
+        key: u64,
+    },
+    Cas {
+        key: u64,
+        old: Option<u64>,
+        new: Option<u64>,
+    },
+    Range {
+        start: u64,
+        end: u64,
+    },
 }
 
 impl<'a> Arbitrary<'a> for Op {
@@ -22,9 +35,23 @@ impl<'a> Arbitrary<'a> for Op {
                 key: u.int_in_range(0..=KEYSPACE as u64)?,
                 value: u.int_in_range(0..=KEYSPACE as u64)?,
             }
-        } else if u.ratio(3, 4)? {
+        } else if u.ratio(1, 2)? {
             Op::Remove {
                 key: u.int_in_range(0..=KEYSPACE as u64)?,
+            }
+        } else if u.ratio(1, 2)? {
+            Op::Cas {
+                key: u.int_in_range(0..=KEYSPACE as u64)?,
+                old: if u.ratio(1, 2)? {
+                    Some(u.int_in_range(0..=KEYSPACE as u64)?)
+                } else {
+                    None
+                },
+                new: if u.ratio(1, 2)? {
+                    Some(u.int_in_range(0..=KEYSPACE as u64)?)
+                } else {
+                    None
+                },
             }
         } else {
             let start = u.int_in_range(0..=KEYSPACE as u64)?;
@@ -56,6 +83,26 @@ fuzz_target!(|ops: Vec<Op>| {
                 }
 
                 assert_eq!(tree_iter.next(), None);
+            }
+            Op::Cas { key, old, new } => {
+                let succ = if old == model.get(&key).copied() {
+                    if let Some(n) = new {
+                        model.insert(key, n);
+                    } else {
+                        model.remove(&key);
+                    }
+                    true
+                } else {
+                    false
+                };
+
+                let res = tree.cas(key, old.as_ref(), new);
+
+                if succ {
+                    assert!(res.is_ok());
+                } else {
+                    assert!(res.is_err());
+                }
             }
         };
 

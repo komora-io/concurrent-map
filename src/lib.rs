@@ -614,9 +614,45 @@ where
                 .leaf_for_key(&key, &self.idgen, &self.free_ids, &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.cas(key.clone(), old, new.clone());
+
+            let mut rhs_id = None;
+
+            if leaf_clone.should_split() {
+                let new_id = self
+                    .free_ids
+                    .pop()
+                    .unwrap_or_else(|| self.idgen.fetch_add(1, Ordering::Relaxed));
+
+                let (lhs, rhs) = leaf_clone.split(new_id);
+
+                assert!(!lhs.should_split());
+                assert!(!rhs.should_split());
+
+                let rhs_ptr = Box::into_raw(Box::new(rhs));
+
+                let atomic_ptr_ref = self.inner.table.get(new_id);
+
+                let prev = atomic_ptr_ref.swap(rhs_ptr, Ordering::Release);
+
+                assert!(prev.is_null());
+
+                rhs_id = Some(new_id);
+
+                leaf_clone = Box::new(lhs);
+            };
+
+            assert!(!leaf_clone.should_split());
+
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
+
             if install_attempt.is_ok() {
                 return ret;
+            } else if let Some(new_id) = rhs_id {
+                let atomic_ptr_ref = self.inner.table.get(new_id);
+
+                // clear dangling ptr (cas freed it already)
+                let _rhs_ptr = atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                self.free_ids.push(new_id);
             }
         }
     }
