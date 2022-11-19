@@ -50,7 +50,7 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
         Q: Ord + ?Sized,
     {
         self.inner[..self.len()]
-            .binary_search_by_key(&key, |slot| unsafe { &slot.assume_init_ref().0.borrow() })
+            .binary_search_by_key(&key, |slot| unsafe { slot.assume_init_ref().0.borrow() })
     }
 
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -134,6 +134,7 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
     // returns the split key and the right hand split
     pub fn split_off(&mut self, split_idx: usize) -> (K, Self) {
         assert!(split_idx < self.len());
+        assert!(split_idx < FANOUT);
 
         let split_key = unsafe { self.inner[split_idx].assume_init_ref().0.clone() };
 

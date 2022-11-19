@@ -917,12 +917,6 @@ where
                 Ok(new_child) | Err(Some(new_child)) => new_child,
                 Err(None) => {
                     // child already removed
-                    /*
-                    println!(
-                        "returning early from merge_child because \
-                        the merging child has already been freed"
-                    );
-                    */
                     return;
                 }
             };
@@ -942,13 +936,6 @@ where
             view
         } else {
             // the merge already completed and this left sibling has already also been merged
-            /*
-            println!(
-                "returning early from merge_child because the \
-                first left sibling guess is freed, meaning the \
-                merge already succeeded"
-            );
-            */
             return;
         };
 
@@ -961,7 +948,6 @@ where
 
             if child.hi.is_some() && left_sibling.hi.is_some() && left_sibling.hi >= child.hi {
                 // step 4 happened concurrently
-                // println!("breaking from the left sibling install loop because left_sibling.hi ({:?}) >= child.hi ({:?})", left_sibling.hi, child.hi);
                 break;
             }
 
@@ -971,13 +957,6 @@ where
                     view
                 } else {
                     // the merge already completed and this left sibling has already also been merged
-                    /*
-                    println!(
-                        "returning early from merge_child because one of the left siblings \
-                        of the merging child is already freed, meaning \
-                        the merge must have completed already"
-                    );
-                    */
                     return;
                 };
                 continue;
@@ -1033,18 +1012,10 @@ where
             }
             match cas_result {
                 Ok(_) => {
-                    // println!("successfully merged child into its left sibling");
                     break;
                 }
                 Err(Some(actual)) => left_sibling = actual,
                 Err(None) => {
-                    /*
-                    println!(
-                        "returning early from merge_child because \
-                        one of the left siblings has already been \
-                        freed, implying the original merge completed."
-                    );
-                    */
                     return;
                 }
             }
@@ -1064,13 +1035,6 @@ where
             match cas_result {
                 Ok(new_parent) | Err(Some(new_parent)) => *parent = new_parent,
                 Err(None) => {
-                    /*
-                    println!(
-                        "returning early from merge_child because the parent \
-                        of the merged child has already been freed, indicating \
-                        that the merge already completed."
-                    );
-                    */
                     return;
                 }
             }
@@ -1089,13 +1053,6 @@ where
         {
             // only the thread that uninstalls this pointer gets to
             // mark resources for reuse.
-            /*
-            println!(
-                "returning early from merge_child because we lost \
-                the race to remove the child pointer from the \
-                page table."
-            );
-            */
             return;
         }
 
@@ -1108,8 +1065,6 @@ where
         // 8. defer the reclamation of the child node
         let replaced: Box<Node<K, V, FANOUT>> = unsafe { Box::from_raw(child.ptr.as_ptr()) };
         guard.defer_drop(Deferred::DropNode(replaced));
-
-        // println!("merge_child fully completed");
     }
 
     #[cfg(feature = "timing")]
@@ -1149,14 +1104,12 @@ where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        // println!("looking for key {key:?}");
         let mut parent_cursor_opt: Option<NodeView<'a, K, V, FANOUT>> = None;
         let mut cursor = self.root(guard);
         let mut root_id = cursor.id;
 
         macro_rules! reset {
             ($reason:expr) => {
-                // println!("reset at {} due to {}", line!(), $reason);
                 parent_cursor_opt = None;
                 cursor = self.root(guard);
                 root_id = cursor.id;
@@ -1168,7 +1121,6 @@ where
         let before = Instant::now();
 
         loop {
-            // println!("cursor is: {} -> {:?}", cursor.id, *cursor);
             if let Some(merging_child_id) = cursor.merging_child {
                 let mut child = if let Some(view) = self.view_for_id(merging_child_id.get(), guard)
                 {
@@ -1213,7 +1165,6 @@ where
                     let rhs = if let Some(view) = self.view_for_id(next.get(), guard) {
                         view
                     } else {
-                        // println!("right child {next} not found");
                         reset!("right child already freed");
                     };
 
@@ -1321,7 +1272,6 @@ where
                 reset!("attempt to traverse to child failed because the child has been freed");
             };
         }
-        // println!("final leaf is: {:?}", *cursor);
 
         #[cfg(feature = "timing")]
         self.record_timing(before.elapsed());
@@ -1600,9 +1550,9 @@ where
     }
 }
 
-fn _test_impls() {
-    fn send<T: Send>() {}
-    fn clone<T: Clone>() {}
+const fn _test_impls() {
+    const fn send<T: Send>() {}
+    const fn clone<T: Clone>() {}
     send::<ConcurrentMap<usize, usize>>();
     clone::<ConcurrentMap<usize, usize>>();
 }
@@ -1664,7 +1614,7 @@ fn timing_tree() {
 
     let scan = Instant::now();
     let count = tree.range(..).count();
-    assert_eq!(count, n as _);
+    assert_eq!(count as u64, n);
     let scan_elapsed = scan.elapsed();
     println!(
         "{} scanned items/s, total {:?}",
@@ -1760,7 +1710,7 @@ fn big_scan() {
             let insert_elapsed = insert.elapsed();
             println!(
                 "{} inserts/s, total {:?}",
-                (stride as u64 * 1000)
+                (u64::from(stride) * 1000)
                     / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
                 insert_elapsed
             );
@@ -1774,7 +1724,7 @@ fn big_scan() {
         let scan_elapsed = scan.elapsed();
         println!(
             "{} scanned items/s, total {:?}",
-            (stride as u64 * 1000)
+            (u64::from(stride) * 1000)
                 / u64::try_from(scan_elapsed.as_millis().max(1)).unwrap_or(u64::MAX),
             scan_elapsed
         );
@@ -1792,7 +1742,7 @@ fn big_scan() {
             let start_fill = i * stride;
             let stop_fill = (i + 1) * stride;
 
-            let thread = s.spawn(move || fill(tree_2, &barrier_2, start_fill, stop_fill));
+            let thread = s.spawn(move || fill(tree_2, barrier_2, start_fill, stop_fill));
             threads.push(thread);
         }
         for thread in threads {
@@ -1806,7 +1756,7 @@ fn big_scan() {
             let tree_2 = tree.clone();
             let barrier_2 = &barrier;
 
-            let thread = s.spawn(move || read(tree_2, &barrier_2));
+            let thread = s.spawn(move || read(tree_2, barrier_2));
             threads.push(thread);
         }
         for thread in threads {
