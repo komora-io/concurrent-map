@@ -112,7 +112,7 @@ use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::{
-    atomic::{AtomicPtr, AtomicU64, Ordering},
+    atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -350,6 +350,9 @@ where
     // to ebr with immutable references to other
     // things.
     inner: Arc<Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>>,
+    // an eventually consistent, lagging count of the
+    // number of items in this structure.
+    len: Arc<AtomicUsize>,
 }
 
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> fmt::Debug
@@ -412,6 +415,7 @@ where
             idgen: Arc::new(3.into()),
             free_ids: Stack::default(),
             inner,
+            len: Arc::new(0.into()),
         }
     }
 }
@@ -535,6 +539,9 @@ where
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
 
             if install_attempt.is_ok() {
+                if ret.is_none() {
+                    self.len.fetch_add(1, Ordering::Relaxed);
+                }
                 return ret;
             } else if let Some(new_id) = rhs_id {
                 let atomic_ptr_ref = self.inner.table.get(new_id);
@@ -561,6 +568,9 @@ where
             let ret = leaf_clone.remove(key);
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
             if install_attempt.is_ok() {
+                if ret.is_some() {
+                    self.len.fetch_sub(1, Ordering::Relaxed);
+                }
                 return ret;
             }
         }
@@ -657,15 +667,28 @@ where
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
 
             if install_attempt.is_ok() {
+                if matches!(ret, Ok(Some(_))) && new.is_none() {
+                    self.len.fetch_sub(1, Ordering::Relaxed);
+                } else if matches!(ret, Ok(None)) && new.is_some() {
+                    self.len.fetch_add(1, Ordering::Relaxed);
+                }
                 return ret;
             } else if let Some(new_id) = rhs_id {
                 let atomic_ptr_ref = self.inner.table.get(new_id);
 
                 // clear dangling ptr (cas freed it already)
-                let _rhs_ptr = atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                let _rhs_ptr =
+                    atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
                 self.free_ids.push(new_id);
             }
         }
+    }
+
+    /// A **lagging**, eventually-consistent length count. This is NOT atomically
+    /// updated with [`insert`] / [`remove`] / [`cas`], but is updated after those
+    /// operations complete their atomic modifications to the shared map.
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
     }
 
     /// Iterate over the tree.
