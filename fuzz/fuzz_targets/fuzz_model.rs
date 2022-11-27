@@ -110,11 +110,11 @@ fuzz_target!(|ops: Vec<Op>| {
             assert_eq!(tree.get(key), Some(*value));
         }
 
-        /* TODO
         for (key, value) in &tree {
-            assert_eq!(model.get(key), Some(value));
+            assert_eq!(model.get(&key), Some(&value));
         }
-        */
+
+        assert_eq!(tree.len(), model.len());
     }
 
     let mut model_iter = model.iter();
