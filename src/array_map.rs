@@ -3,8 +3,8 @@ use std::mem::MaybeUninit;
 
 #[derive(Debug)]
 pub struct ArrayMap<K: Clone + Ord, V: Clone, const FANOUT: usize> {
+    len: usize,
     inner: [MaybeUninit<(K, V)>; FANOUT],
-    len: u8,
 }
 
 impl<K: Clone + Ord, V: Clone, const FANOUT: usize> Drop for ArrayMap<K, V, FANOUT> {
@@ -148,8 +148,8 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
             }
         }
 
-        rhs.len = self.len - split_idx as u8;
-        self.len = u8::try_from(split_idx).unwrap();
+        rhs.len = self.len - split_idx;
+        self.len = split_idx;
 
         (split_key, rhs)
     }
@@ -163,7 +163,7 @@ impl<K: Clone + Ord, V: Clone, const FANOUT: usize> ArrayMap<K, V, FANOUT> {
     }
 
     pub const fn len(&self) -> usize {
-        self.len as usize
+        self.len
     }
 }
 
