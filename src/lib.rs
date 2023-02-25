@@ -98,13 +98,12 @@
 //! This is an ordered data structure, and supports very high throughput iteration over
 //! lexicographically sorted ranges of values. If you are looking for simple point operation
 //! performance, you may find a better option among one of the many concurrent
-//! hashmap implementatinos that are floating around.
+//! hashmap implementations that are floating around.
 
-mod array_map;
 mod stack;
 
-use array_map::ArrayMap;
 use stack::{Pusher, Stack};
+use stack_map::StackMap;
 
 use std::borrow::Borrow;
 use std::fmt;
@@ -677,8 +676,7 @@ where
                 let atomic_ptr_ref = self.inner.table.get(new_id);
 
                 // clear dangling ptr (cas freed it already)
-                let _rhs_ptr =
-                    atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
+                let _rhs_ptr = atomic_ptr_ref.swap(std::ptr::null_mut(), Ordering::AcqRel);
                 self.free_ids.push(new_id);
             }
         }
@@ -903,7 +901,7 @@ where
         // 1. try to mark the parent's merging_child
         //  a. must not be the left-most child
         //  b. if unsuccessful, give up
-        let is_leftmost_child = parent.index().is_leftmost(&child.lo);
+        let is_leftmost_child = parent.index().get_index(0).unwrap().0 == child.lo;
 
         if is_leftmost_child {
             return Err(());
@@ -1161,7 +1159,8 @@ where
 
             if cursor.should_merge() {
                 if let Some(ref mut parent_cursor) = parent_cursor_opt {
-                    let is_leftmost_child = parent_cursor.index().is_leftmost(&cursor.lo);
+                    let is_leftmost_child =
+                        parent_cursor.index().get_index(0).unwrap().0 == cursor.lo;
 
                     if !is_leftmost_child {
                         if let Ok(new_parent) =
@@ -1286,7 +1285,7 @@ where
             }
 
             // go down the tree
-            let child_id = cursor.index().index_next_child(key);
+            let child_id = cursor.index().get_less_than_or_equal(key).unwrap().1;
 
             parent_cursor_opt = Some(cursor);
             cursor = if let Some(view) = self.view_for_id(child_id, guard) {
@@ -1309,8 +1308,8 @@ where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
 {
-    Leaf(ArrayMap<K, V, FANOUT>),
-    Index(ArrayMap<K, Id, FANOUT>),
+    Leaf(StackMap<K, V, FANOUT>),
+    Index(StackMap<K, Id, FANOUT>),
 }
 
 #[derive(Debug)]
@@ -1349,7 +1348,7 @@ where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
 {
-    const fn index(&self) -> &ArrayMap<K, Id, FANOUT> {
+    const fn index(&self) -> &StackMap<K, Id, FANOUT> {
         if let Data::Index(ref index) = self.data {
             index
         } else {
@@ -1357,7 +1356,7 @@ where
         }
     }
 
-    fn index_mut(&mut self) -> &mut ArrayMap<K, Id, FANOUT> {
+    fn index_mut(&mut self) -> &mut StackMap<K, Id, FANOUT> {
         if let Data::Index(ref mut index) = self.data {
             index
         } else {
@@ -1365,7 +1364,7 @@ where
         }
     }
 
-    const fn leaf(&self) -> &ArrayMap<K, V, FANOUT> {
+    const fn leaf(&self) -> &StackMap<K, V, FANOUT> {
         if let Data::Leaf(ref leaf) = self.data {
             leaf
         } else {
@@ -1373,7 +1372,7 @@ where
         }
     }
 
-    fn leaf_mut(&mut self) -> &mut ArrayMap<K, V, FANOUT> {
+    fn leaf_mut(&mut self) -> &mut StackMap<K, V, FANOUT> {
         if let Data::Leaf(ref mut leaf) = self.data {
             leaf
         } else {

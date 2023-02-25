@@ -2,7 +2,7 @@
 name = "concurrent-map"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "a lock-free linearizable B+ tree"
-version = "5.0.6"
+version = "5.0.7"
 edition = "2021"
 license = "GPL-3.0"
 repository = "https://github.com/komora-io/concurrent-map"
@@ -20,3 +20,4 @@ fuzz_constants = []
 [dependencies]
 ebr = "0.2"
 pagetable = "0.3"
+stack-map = "0.1.1"
