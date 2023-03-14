@@ -1495,7 +1495,15 @@ where
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
 
-        let split_idx = FANOUT / 2;
+        let split_idx = if self.hi.is_none() {
+            // the infinity node should split almost at the end to improve fill ratio
+            self.len() - 2
+        } else if self.lo == K::MIN {
+            // the right-most node should split almost at the beginning to improve fill ratio
+            1
+        } else {
+            FANOUT / 2
+        };
 
         let (split_point, rhs_data) = match self.data {
             Data::Leaf(ref mut leaf) => {
