@@ -519,11 +519,7 @@ where
             }
             let child_id: Id<K, V, FANOUT> = cursor.index().get_index(0).unwrap().1;
 
-            let new_cursor_opt: Option<NodeView<K, V, FANOUT>> = child_id.node_view(&mut guard);
-            drop(child_id);
-            let new_cursor = new_cursor_opt.unwrap();
-
-            cursor = new_cursor;
+            cursor = child_id.node_view(&mut guard).unwrap();
         }
 
         for lhs_id in lhs_chain {
@@ -1641,7 +1637,7 @@ fn concurrent_tree() {
         .unwrap_or(8)
         * 2;
 
-    let run = |tree: ConcurrentMap<u16, u16>, barrier: &std::sync::Barrier, low_bits| {
+    let run = |tree: ConcurrentMap<u16, u16, 8>, barrier: &std::sync::Barrier, low_bits| {
         let shift = concurrency.next_power_of_two().trailing_zeros();
         let unique_key = |key| (key << shift) | low_bits;
 
