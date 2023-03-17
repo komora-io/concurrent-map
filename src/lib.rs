@@ -1794,3 +1794,48 @@ fn big_scan() {
         }
     });
 }
+
+#[test]
+fn bulk_load() {
+    let n: u64 = 16 * 1024 * 1024;
+
+    let concurrency = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(8) as u64;
+
+    let run = |tree: ConcurrentMap<u64, u64>, barrier: &std::sync::Barrier, low_bits| {
+        let shift = concurrency.next_power_of_two().trailing_zeros();
+        let unique_key = |key| (key << shift) | low_bits;
+
+        barrier.wait();
+        for key in 0..n / concurrency {
+            let i = unique_key(key);
+            tree.insert(i, i);
+        }
+    };
+
+    let tree = ConcurrentMap::default();
+
+    std::thread::scope(|s| {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(1 + concurrency as usize));
+        let mut threads = vec![];
+        for i in 0..concurrency {
+            let tree_2 = tree.clone();
+            let barrier_2 = barrier.clone();
+
+            let thread = s.spawn(move || run(tree_2, &barrier_2, i));
+            threads.push(thread);
+        }
+        barrier.wait();
+        let insert = std::time::Instant::now();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let insert_elapsed = insert.elapsed();
+        println!(
+            "{} inserts/s, total {:?}",
+            (n * 1000) / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
+            insert_elapsed
+        );
+    });
+}
