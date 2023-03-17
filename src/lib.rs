@@ -1207,7 +1207,6 @@ where
                         }
                     } else {
                         // root hoist
-                        println!("hoisting root");
                         let new_index_id = Id::default();
                         new_index_id.store(root_cursor.ptr.as_ptr(), Ordering::Release);
 
