@@ -19,5 +19,4 @@ fuzz_constants = []
 
 [dependencies]
 ebr = "0.2"
-pagetable = "0.3"
 stack-map = "0.1.1"
