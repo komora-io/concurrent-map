@@ -1802,7 +1802,7 @@ fn bulk_load() {
         }
         let insert_elapsed = insert.elapsed();
         println!(
-            "{} inserts/s, total {:?}",
+            "{} bulk inserts/s, total {:?}",
             (n * 1000) / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
             insert_elapsed
         );
