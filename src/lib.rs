@@ -126,7 +126,7 @@ enum Deferred<
     const FANOUT: usize,
 > {
     Node(Box<Node<K, V, FANOUT>>),
-    Id(Id<K, V, FANOUT>),
+    BoxedAtomicPtr(BoxedAtomicPtr<K, V, FANOUT>),
 }
 
 impl<
@@ -136,7 +136,7 @@ impl<
     > Drop for Deferred<K, V, FANOUT>
 {
     fn drop(&mut self) {
-        if let Deferred::Id(id) = self {
+        if let Deferred::BoxedAtomicPtr(id) = self {
             assert!(!id.0.is_null());
             let reclaimed: Box<AtomicPtr<Node<K, V, FANOUT>>> =
                 unsafe { Box::from_raw(id.0 as *mut _) };
@@ -146,7 +146,7 @@ impl<
 }
 
 #[derive(Debug, Clone, Eq)]
-struct Id<
+struct BoxedAtomicPtr<
     K: 'static + Clone + Minimum + Send + Sync + Ord,
     V: 'static + Clone + Send + Sync,
     const FANOUT: usize,
@@ -156,7 +156,7 @@ impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > Copy for Id<K, V, FANOUT>
+    > Copy for BoxedAtomicPtr<K, V, FANOUT>
 {
 }
 
@@ -164,7 +164,7 @@ impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > PartialEq for Id<K, V, FANOUT>
+    > PartialEq for BoxedAtomicPtr<K, V, FANOUT>
 {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
@@ -175,7 +175,7 @@ unsafe impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > Send for Id<K, V, FANOUT>
+    > Send for BoxedAtomicPtr<K, V, FANOUT>
 {
 }
 
@@ -183,7 +183,7 @@ unsafe impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > Sync for Id<K, V, FANOUT>
+    > Sync for BoxedAtomicPtr<K, V, FANOUT>
 {
 }
 
@@ -191,7 +191,7 @@ impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > Deref for Id<K, V, FANOUT>
+    > Deref for BoxedAtomicPtr<K, V, FANOUT>
 {
     type Target = AtomicPtr<Node<K, V, FANOUT>>;
 
@@ -204,11 +204,11 @@ impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > Default for Id<K, V, FANOUT>
+    > Default for BoxedAtomicPtr<K, V, FANOUT>
 {
-    fn default() -> Id<K, V, FANOUT> {
+    fn default() -> BoxedAtomicPtr<K, V, FANOUT> {
         let ptr = Box::into_raw(Box::default());
-        Id(ptr)
+        BoxedAtomicPtr(ptr)
     }
 }
 
@@ -216,7 +216,7 @@ impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > Id<K, V, FANOUT>
+    > BoxedAtomicPtr<K, V, FANOUT>
 {
     fn node_view<const LOCAL_GC_BUFFER_SIZE: usize>(
         &self,
@@ -245,7 +245,7 @@ where
     V: 'static + Clone + Send + Sync,
 {
     ptr: NonNull<Node<K, V, FANOUT>>,
-    id: Id<K, V, FANOUT>,
+    id: BoxedAtomicPtr<K, V, FANOUT>,
 }
 
 impl<K, V, const FANOUT: usize> NodeView<K, V, FANOUT>
@@ -453,8 +453,8 @@ where
             LOCAL_GC_BUFFER_SIZE > 0,
             "LOCAL_GC_BUFFER_SIZE must be greater than 0"
         );
-        let root = Id::default();
-        let leaf = Id::default();
+        let root = BoxedAtomicPtr::default();
+        let leaf = BoxedAtomicPtr::default();
 
         let mut root_node = Node::<K, V, FANOUT>::new_root();
         let root_node_lo = root_node.lo.clone();
@@ -489,7 +489,7 @@ where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
 {
-    root: Id<K, V, FANOUT>,
+    root: BoxedAtomicPtr<K, V, FANOUT>,
     #[cfg(feature = "timing")]
     slowest_op: AtomicU64,
     #[cfg(feature = "timing")]
@@ -511,20 +511,20 @@ where
 
         let mut cursor: NodeView<K, V, FANOUT> = self.root(&mut guard);
 
-        let mut lhs_chain: Vec<Id<K, V, FANOUT>> = vec![];
+        let mut lhs_chain: Vec<BoxedAtomicPtr<K, V, FANOUT>> = vec![];
 
         loop {
             lhs_chain.push(cursor.id);
             if cursor.is_leaf() {
                 break;
             }
-            let child_id: Id<K, V, FANOUT> = cursor.index().get_index(0).unwrap().1;
+            let child_ptr: BoxedAtomicPtr<K, V, FANOUT> = cursor.index().get_index(0).unwrap().1;
 
-            cursor = child_id.node_view(&mut guard).unwrap();
+            cursor = child_ptr.node_view(&mut guard).unwrap();
         }
 
-        for lhs_id in lhs_chain {
-            let mut next_opt: Option<Id<K, V, FANOUT>> = Some(lhs_id);
+        for lhs_ptr in lhs_chain {
+            let mut next_opt: Option<BoxedAtomicPtr<K, V, FANOUT>> = Some(lhs_ptr);
             while let Some(next) = next_opt {
                 assert!(!next.0.is_null());
                 let sibling_cursor = next.node_view(&mut guard).unwrap();
@@ -532,9 +532,9 @@ where
                 let node_box = unsafe { Box::from_raw(sibling_cursor.ptr.as_ptr()) };
                 drop(node_box);
 
-                let reclaimed_id: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                let reclaimed_ptr: Box<AtomicPtr<Node<K, V, FANOUT>>> =
                     unsafe { Box::from_raw(next.0 as *mut _) };
-                drop(reclaimed_id);
+                drop(reclaimed_ptr);
             }
         }
     }
@@ -572,23 +572,23 @@ where
             );
             let ret = leaf_clone.insert(key.clone(), value.clone());
 
-            let mut rhs_id = None;
+            let mut rhs_ptr_opt = None;
 
             if leaf_clone.should_split() {
-                let new_id = Id::default();
+                let new_ptr = BoxedAtomicPtr::default();
 
-                let (lhs, rhs) = leaf_clone.split(new_id);
+                let (lhs, rhs) = leaf_clone.split(new_ptr);
 
                 assert!(!lhs.should_split());
                 assert!(!rhs.should_split());
 
                 let rhs_ptr = Box::into_raw(Box::new(rhs));
 
-                let prev = new_id.swap(rhs_ptr, Ordering::Release);
+                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
 
                 assert!(prev.is_null());
 
-                rhs_id = Some(new_id);
+                rhs_ptr_opt = Some(new_ptr);
 
                 leaf_clone = Box::new(lhs);
             };
@@ -602,13 +602,13 @@ where
                     self.len.fetch_add(1, Ordering::Relaxed);
                 }
                 return ret;
-            } else if let Some(new_id) = rhs_id {
-                // clear dangling Id (cas freed the pointee already)
-                let reclaimed_id: Box<AtomicPtr<Node<K, V, FANOUT>>> =
-                    unsafe { Box::from_raw(new_id.0 as *mut _) };
+            } else if let Some(new_ptr) = rhs_ptr_opt {
+                // clear dangling BoxedAtomicPtr (cas freed the pointee already)
+                let reclaimed_ptr: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                    unsafe { Box::from_raw(new_ptr.0 as *mut _) };
 
                 let _dropping_reclaimed_rhs: Box<Node<K, V, FANOUT>> =
-                    unsafe { Box::from_raw(reclaimed_id.load(Ordering::Acquire)) };
+                    unsafe { Box::from_raw(reclaimed_ptr.load(Ordering::Acquire)) };
             }
         }
     }
@@ -692,23 +692,22 @@ where
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.cas(key.clone(), old, new.clone());
 
-            let mut rhs_id = None;
+            let mut rhs_ptr_opt = None;
 
             if leaf_clone.should_split() {
-                let new_id = Id::default();
+                let new_ptr = BoxedAtomicPtr::default();
 
-                let (lhs, rhs) = leaf_clone.split(new_id);
+                let (lhs, rhs) = leaf_clone.split(new_ptr);
 
                 assert!(!lhs.should_split());
                 assert!(!rhs.should_split());
 
                 let rhs_ptr = Box::into_raw(Box::new(rhs));
 
-                let prev = new_id.swap(rhs_ptr, Ordering::Release);
-
+                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
                 assert!(prev.is_null());
 
-                rhs_id = Some(new_id);
+                rhs_ptr_opt = Some(new_ptr);
 
                 leaf_clone = Box::new(lhs);
             };
@@ -724,11 +723,13 @@ where
                     self.len.fetch_add(1, Ordering::Relaxed);
                 }
                 return ret;
-            } else if let Some(new_id) = rhs_id {
-                // clear dangling Id (cas freed pointee already)
-                let reclaimed: Box<AtomicPtr<Node<K, V, FANOUT>>> =
-                    unsafe { Box::from_raw(new_id.0 as *mut _) };
-                drop(reclaimed);
+            } else if let Some(new_ptr) = rhs_ptr_opt {
+                // clear dangling BoxedAtomicPtr (cas freed pointee already)
+                let reclaimed_ptr: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                    unsafe { Box::from_raw(new_ptr.0 as *mut _) };
+
+                let _dropping_reclaimed_rhs: Box<Node<K, V, FANOUT>> =
+                    unsafe { Box::from_raw(reclaimed_ptr.load(Ordering::Acquire)) };
             }
         }
     }
@@ -857,12 +858,12 @@ where
                     continue;
                 }
                 return Some((k.clone(), v.clone()));
-            } else if let Some(next_id) = self.current.next {
+            } else if let Some(next_ptr) = self.current.next {
                 if !self.range.contains(self.current.hi.as_ref().unwrap()) {
                     // we have reached the end of our range
                     return None;
                 }
-                if let Some(next_view) = next_id.node_view(&mut self.guard) {
+                if let Some(next_view) = next_ptr.node_view(&mut self.guard) {
                     // we were able to take the fast path by following the sibling pointer
                     self.current = next_view;
                     self.next_index = 0;
@@ -912,7 +913,7 @@ where
     //  c. split the new larger left sibling if it is at the split threshold
     // 5. cas the parent to remove the merged child
     // 6. remove the child's pointer in the page table
-    // 7. defer the reclamation of the child node
+    // 7. defer the reclamation of the BoxedAtomicPtr
     // 8. defer putting the child's ID into the free stack
     //
     // merge threshold must be >= 1, because otherwise index nodes with 1 empty
@@ -1013,27 +1014,27 @@ where
             let mut left_sibling_clone: Box<Node<K, V, FANOUT>> = Box::new((*left_sibling).clone());
             left_sibling_clone.merge(child);
 
-            let mut split_rhs_id_opt = None;
+            let mut rhs_ptr_opt = None;
 
             if left_sibling_clone.should_split() {
                 // we have to try to split the sibling, funny enough.
                 // this is the consequence of using fixed-size arrays
                 // for storing items with no flexibility.
 
-                let new_id = Id::default();
+                let new_ptr = BoxedAtomicPtr::default();
 
-                let (lhs, rhs) = left_sibling_clone.split(new_id);
+                let (lhs, rhs) = left_sibling_clone.split(new_ptr);
 
                 assert!(!lhs.should_split());
                 assert!(!rhs.should_split());
 
                 let rhs_ptr = Box::into_raw(Box::new(rhs));
 
-                let prev = new_id.swap(rhs_ptr, Ordering::Release);
+                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
 
                 assert!(prev.is_null());
 
-                split_rhs_id_opt = Some(new_id);
+                rhs_ptr_opt = Some(new_ptr);
 
                 left_sibling_clone = Box::new(lhs);
             };
@@ -1041,11 +1042,13 @@ where
             assert!(!left_sibling_clone.should_split());
 
             let cas_result = left_sibling.cas(left_sibling_clone, guard);
-            if let (Err(_), Some(split_rhs_id)) = (&cas_result, split_rhs_id_opt) {
+            if let (Err(_), Some(rhs_ptr)) = (&cas_result, rhs_ptr_opt) {
                 // We need to free the split right sibling that we installed
-                let reclaimed: Box<AtomicPtr<Node<K, V, FANOUT>>> =
-                    unsafe { Box::from_raw(split_rhs_id.0 as *mut _) };
-                drop(reclaimed);
+                let reclaimed_ptr: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                    unsafe { Box::from_raw(rhs_ptr.0 as *mut _) };
+
+                let _dropping_reclaimed_rhs: Box<Node<K, V, FANOUT>> =
+                    unsafe { Box::from_raw(reclaimed_ptr.load(Ordering::Acquire)) };
             }
 
             match cas_result {
@@ -1094,8 +1097,8 @@ where
             return;
         }
 
-        // 7. defer the reclamation of the Id
-        guard.defer_drop(Deferred::Id(child.id));
+        // 7. defer the reclamation of the BoxedAtomicPtr
+        guard.defer_drop(Deferred::BoxedAtomicPtr(child.id));
 
         // 8. defer the reclamation of the child node
         let replaced: Box<Node<K, V, FANOUT>> = unsafe { Box::from_raw(child.ptr.as_ptr()) };
@@ -1161,8 +1164,8 @@ where
         let before = Instant::now();
 
         loop {
-            if let Some(merging_child_id) = cursor.merging_child {
-                let mut child = if let Some(view) = merging_child_id.node_view(guard) {
+            if let Some(merging_child_ptr) = cursor.merging_child {
+                let mut child = if let Some(view) = merging_child_ptr.node_view(guard) {
                     view
                 } else {
                     reset!("merging child of marked parent already freed");
@@ -1215,43 +1218,43 @@ where
                             assert!(!parent_clone.is_leaf());
                             parent_clone.index_mut().insert(rhs.lo.clone(), next);
 
-                            let mut new_parent_id = None;
+                            let mut rhs_ptr_opt = None;
 
                             if parent_clone.should_split() {
-                                let new_id = Id::default();
+                                let new_ptr = BoxedAtomicPtr::default();
 
-                                let (new_lhs, new_rhs) = parent_clone.split(new_id);
+                                let (new_lhs, new_rhs) = parent_clone.split(new_ptr);
 
                                 let rhs_ptr = Box::into_raw(Box::new(new_rhs));
 
-                                let prev = new_id.swap(rhs_ptr, Ordering::Release);
+                                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
 
                                 assert!(prev.is_null());
 
-                                new_parent_id = Some(new_id);
+                                rhs_ptr_opt = Some(new_ptr);
 
                                 parent_clone = Box::new(new_lhs);
                             };
 
                             if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
                                 parent_cursor_opt = Some(new_parent_view);
-                            } else if let Some(new_id) = new_parent_id {
-                                let reclaimed_id: Box<AtomicPtr<Node<K, V, FANOUT>>> =
-                                    unsafe { Box::from_raw(new_id.0 as *mut _) };
+                            } else if let Some(rhs_ptr) = rhs_ptr_opt {
+                                let reclaimed_ptr: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                                    unsafe { Box::from_raw(rhs_ptr.0 as *mut _) };
 
                                 let _dropping_reclaimed_rhs: Box<Node<K, V, FANOUT>> =
-                                    unsafe { Box::from_raw(reclaimed_id.load(Ordering::Acquire)) };
+                                    unsafe { Box::from_raw(reclaimed_ptr.load(Ordering::Acquire)) };
                             }
                         }
                     } else {
                         // root hoist
-                        let new_index_id = Id::default();
-                        new_index_id.store(root_cursor.ptr.as_ptr(), Ordering::Release);
+                        let new_index_ptr = BoxedAtomicPtr::default();
+                        new_index_ptr.store(root_cursor.ptr.as_ptr(), Ordering::Release);
 
                         let mut new_root_node = Node::<K, V, FANOUT>::new_root();
                         new_root_node
                             .index_mut()
-                            .insert(cursor.lo.clone(), new_index_id);
+                            .insert(cursor.lo.clone(), new_index_ptr);
                         new_root_node.index_mut().insert(rhs.lo.clone(), next);
                         let new_root_ptr = Box::into_raw(new_root_node);
 
@@ -1274,9 +1277,9 @@ where
                             let dangling_root = unsafe { Box::from_raw(new_root_ptr) };
                             drop(dangling_root);
 
-                            let reclaimed_id: Box<AtomicPtr<Node<K, V, FANOUT>>> =
-                                unsafe { Box::from_raw(new_index_id.0 as *mut _) };
-                            drop(reclaimed_id);
+                            let reclaimed_ptr: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                                unsafe { Box::from_raw(new_index_ptr.0 as *mut _) };
+                            drop(reclaimed_ptr);
                         }
                     }
 
@@ -1296,10 +1299,10 @@ where
             }
 
             // go down the tree
-            let child_id = cursor.index().get_less_than_or_equal(key).unwrap().1;
+            let child_ptr = cursor.index().get_less_than_or_equal(key).unwrap().1;
 
             parent_cursor_opt = Some(cursor);
-            cursor = if let Some(view) = child_id.node_view(guard) {
+            cursor = if let Some(view) = child_ptr.node_view(guard) {
                 view
             } else {
                 reset!("attempt to traverse to child failed because the child has been freed");
@@ -1320,7 +1323,7 @@ where
     V: 'static + Clone + Send + Sync,
 {
     Leaf(StackMap<K, V, FANOUT>),
-    Index(StackMap<K, Id<K, V, FANOUT>, FANOUT>),
+    Index(StackMap<K, BoxedAtomicPtr<K, V, FANOUT>, FANOUT>),
 }
 
 #[derive(Debug)]
@@ -1329,8 +1332,8 @@ where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
 {
-    next: Option<Id<K, V, FANOUT>>,
-    merging_child: Option<Id<K, V, FANOUT>>,
+    next: Option<BoxedAtomicPtr<K, V, FANOUT>>,
+    merging_child: Option<BoxedAtomicPtr<K, V, FANOUT>>,
     data: Data<K, V, FANOUT>,
     lo: K,
     hi: Option<K>,
@@ -1359,7 +1362,7 @@ where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
 {
-    const fn index(&self) -> &StackMap<K, Id<K, V, FANOUT>, FANOUT> {
+    const fn index(&self) -> &StackMap<K, BoxedAtomicPtr<K, V, FANOUT>, FANOUT> {
         if let Data::Index(ref index) = self.data {
             index
         } else {
@@ -1367,7 +1370,7 @@ where
         }
     }
 
-    fn index_mut(&mut self) -> &mut StackMap<K, Id<K, V, FANOUT>, FANOUT> {
+    fn index_mut(&mut self) -> &mut StackMap<K, BoxedAtomicPtr<K, V, FANOUT>, FANOUT> {
         if let Data::Index(ref mut index) = self.data {
             index
         } else {
@@ -1502,7 +1505,10 @@ where
         }
     }
 
-    fn split(mut self, new_id: Id<K, V, FANOUT>) -> (Node<K, V, FANOUT>, Node<K, V, FANOUT>) {
+    fn split(
+        mut self,
+        new_ptr: BoxedAtomicPtr<K, V, FANOUT>,
+    ) -> (Node<K, V, FANOUT>, Node<K, V, FANOUT>) {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
 
@@ -1528,7 +1534,7 @@ where
         };
 
         let rhs_hi = std::mem::replace(&mut self.hi, Some(split_point.clone()));
-        let rhs_next = std::mem::replace(&mut self.next, Some(new_id));
+        let rhs_next = std::mem::replace(&mut self.next, Some(new_ptr));
 
         let rhs = Node {
             lo: split_point.clone(),
