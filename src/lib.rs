@@ -1222,7 +1222,6 @@ where
 
                                 let (new_lhs, new_rhs) = parent_clone.split(new_id);
 
-                                // TODO leak
                                 let rhs_ptr = Box::into_raw(Box::new(new_rhs));
 
                                 let prev = new_id.swap(rhs_ptr, Ordering::Release);
@@ -1237,9 +1236,11 @@ where
                             if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
                                 parent_cursor_opt = Some(new_parent_view);
                             } else if let Some(new_id) = new_parent_id {
-                                let reclaimed: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                                let reclaimed_id: Box<AtomicPtr<Node<K, V, FANOUT>>> =
                                     unsafe { Box::from_raw(new_id.0 as *mut _) };
-                                drop(reclaimed);
+
+                                let _dropping_reclaimed_rhs: Box<Node<K, V, FANOUT>> =
+                                    unsafe { Box::from_raw(reclaimed_id.load(Ordering::Acquire)) };
                             }
                         }
                     } else {
