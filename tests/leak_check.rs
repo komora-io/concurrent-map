@@ -94,27 +94,24 @@ fn leak_check() {
     let before = Instant::now();
     let resident_before = alloc::resident();
 
-    {
-        let tree = ConcurrentMap::default();
+    std::thread::scope(|s| {
+        for _ in 0..64 {
+            let tree = ConcurrentMap::default();
 
-        std::thread::scope(|s| {
-            for _ in 0..64 {
-                let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency));
-                let mut threads = vec![];
-                for i in 0..concurrency {
-                    let tree_2 = tree.clone();
-                    let barrier_2 = barrier.clone();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency));
+            let mut threads = vec![];
+            for i in 0..concurrency {
+                let tree_2 = tree.clone();
+                let barrier_2 = barrier.clone();
 
-                    let thread =
-                        s.spawn(move || run(tree_2, &barrier_2, u16::try_from(i).unwrap()));
-                    threads.push(thread);
-                }
-                for thread in threads {
-                    thread.join().unwrap();
-                }
+                let thread = s.spawn(move || run(tree_2, &barrier_2, u16::try_from(i).unwrap()));
+                threads.push(thread);
             }
-        });
-    }
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        }
+    });
 
     let resident_after = alloc::resident();
 

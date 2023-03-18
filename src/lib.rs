@@ -287,7 +287,8 @@ where
                 })
             }
             Err(actual) => {
-                let failed_value = unsafe { Box::from_raw(replacement_ptr) };
+                let failed_value: Box<Node<K, V, FANOUT>> =
+                    unsafe { Box::from_raw(replacement_ptr) };
                 drop(failed_value);
 
                 if actual.is_null() {
@@ -571,6 +572,8 @@ where
             );
             let ret = leaf_clone.insert(key.clone(), value.clone());
 
+            let mut rhs_id = None;
+
             if leaf_clone.should_split() {
                 let new_id = Id::default();
 
@@ -585,6 +588,8 @@ where
 
                 assert!(prev.is_null());
 
+                rhs_id = Some(new_id);
+
                 leaf_clone = Box::new(lhs);
             };
 
@@ -597,6 +602,13 @@ where
                     self.len.fetch_add(1, Ordering::Relaxed);
                 }
                 return ret;
+            } else if let Some(new_id) = rhs_id {
+                // clear dangling Id (cas freed the pointee already)
+                let reclaimed_id: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                    unsafe { Box::from_raw(new_id.0 as *mut _) };
+
+                let _dropping_reclaimed_rhs: Box<Node<K, V, FANOUT>> =
+                    unsafe { Box::from_raw(reclaimed_id.load(Ordering::Acquire)) };
             }
         }
     }
@@ -680,6 +692,8 @@ where
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.cas(key.clone(), old, new.clone());
 
+            let mut rhs_id = None;
+
             if leaf_clone.should_split() {
                 let new_id = Id::default();
 
@@ -693,6 +707,8 @@ where
                 let prev = new_id.swap(rhs_ptr, Ordering::Release);
 
                 assert!(prev.is_null());
+
+                rhs_id = Some(new_id);
 
                 leaf_clone = Box::new(lhs);
             };
@@ -708,6 +724,11 @@ where
                     self.len.fetch_add(1, Ordering::Relaxed);
                 }
                 return ret;
+            } else if let Some(new_id) = rhs_id {
+                // clear dangling Id (cas freed pointee already)
+                let reclaimed: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                    unsafe { Box::from_raw(new_id.0 as *mut _) };
+                drop(reclaimed);
             }
         }
     }
@@ -992,6 +1013,8 @@ where
             let mut left_sibling_clone: Box<Node<K, V, FANOUT>> = Box::new((*left_sibling).clone());
             left_sibling_clone.merge(child);
 
+            let mut split_rhs_id_opt = None;
+
             if left_sibling_clone.should_split() {
                 // we have to try to split the sibling, funny enough.
                 // this is the consequence of using fixed-size arrays
@@ -1010,12 +1033,21 @@ where
 
                 assert!(prev.is_null());
 
+                split_rhs_id_opt = Some(new_id);
+
                 left_sibling_clone = Box::new(lhs);
             };
 
             assert!(!left_sibling_clone.should_split());
 
             let cas_result = left_sibling.cas(left_sibling_clone, guard);
+            if let (Err(_), Some(split_rhs_id)) = (&cas_result, split_rhs_id_opt) {
+                // We need to free the split right sibling that we installed
+                let reclaimed: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                    unsafe { Box::from_raw(split_rhs_id.0 as *mut _) };
+                drop(reclaimed);
+            }
+
             match cas_result {
                 Ok(_) => {
                     break;
@@ -1183,22 +1215,31 @@ where
                             assert!(!parent_clone.is_leaf());
                             parent_clone.index_mut().insert(rhs.lo.clone(), next);
 
+                            let mut new_parent_id = None;
+
                             if parent_clone.should_split() {
                                 let new_id = Id::default();
 
                                 let (new_lhs, new_rhs) = parent_clone.split(new_id);
 
+                                // TODO leak
                                 let rhs_ptr = Box::into_raw(Box::new(new_rhs));
 
                                 let prev = new_id.swap(rhs_ptr, Ordering::Release);
 
                                 assert!(prev.is_null());
 
+                                new_parent_id = Some(new_id);
+
                                 parent_clone = Box::new(new_lhs);
                             };
 
                             if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
                                 parent_cursor_opt = Some(new_parent_view);
+                            } else if let Some(new_id) = new_parent_id {
+                                let reclaimed: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                                    unsafe { Box::from_raw(new_id.0 as *mut _) };
+                                drop(reclaimed);
                             }
                         }
                     } else {
@@ -1231,6 +1272,10 @@ where
                         } else {
                             let dangling_root = unsafe { Box::from_raw(new_root_ptr) };
                             drop(dangling_root);
+
+                            let reclaimed_id: Box<AtomicPtr<Node<K, V, FANOUT>>> =
+                                unsafe { Box::from_raw(new_index_id.0 as *mut _) };
+                            drop(reclaimed_id);
                         }
                     }
 
