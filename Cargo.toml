@@ -2,13 +2,17 @@
 name = "concurrent-map"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "a lock-free linearizable B+ tree"
-version = "5.0.9"
+version = "5.0.10"
 edition = "2021"
 license = "GPL-3.0"
 repository = "https://github.com/komora-io/concurrent-map"
 keywords = ["lock-free", "multi-threaded", "performance", "index", "tree"]
 categories = ["concurrency", "data-structures", "rust-patterns"]
 readme = "README.md"
+
+[profile.dev]
+opt-level = 1
+debug = true
 
 [profile.release]
 debug = true

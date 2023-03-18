@@ -204,20 +204,14 @@ impl<
         K: 'static + Clone + Minimum + Send + Sync + Ord,
         V: 'static + Clone + Send + Sync,
         const FANOUT: usize,
-    > Default for BoxedAtomicPtr<K, V, FANOUT>
-{
-    fn default() -> BoxedAtomicPtr<K, V, FANOUT> {
-        let ptr = Box::into_raw(Box::default());
-        BoxedAtomicPtr(ptr)
-    }
-}
-
-impl<
-        K: 'static + Clone + Minimum + Send + Sync + Ord,
-        V: 'static + Clone + Send + Sync,
-        const FANOUT: usize,
     > BoxedAtomicPtr<K, V, FANOUT>
 {
+    fn new(node: Box<Node<K, V, FANOUT>>) -> BoxedAtomicPtr<K, V, FANOUT> {
+        let pointee_ptr = Box::into_raw(node);
+        let pointer_ptr = Box::into_raw(Box::new(AtomicPtr::new(pointee_ptr)));
+        BoxedAtomicPtr(pointer_ptr)
+    }
+
     fn node_view<const LOCAL_GC_BUFFER_SIZE: usize>(
         &self,
         _guard: &mut Guard<'_, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
@@ -453,19 +447,13 @@ where
             LOCAL_GC_BUFFER_SIZE > 0,
             "LOCAL_GC_BUFFER_SIZE must be greater than 0"
         );
-        let root = BoxedAtomicPtr::default();
-        let leaf = BoxedAtomicPtr::default();
-
         let mut root_node = Node::<K, V, FANOUT>::new_root();
         let root_node_lo = root_node.lo.clone();
-        root_node.index_mut().insert(root_node_lo, leaf);
         let leaf_node = Node::<K, V, FANOUT>::new_leaf(root_node.lo.clone());
+        let leaf = BoxedAtomicPtr::new(leaf_node);
+        root_node.index_mut().insert(root_node_lo, leaf);
 
-        let root_ptr = Box::into_raw(root_node);
-        let leaf_ptr = Box::into_raw(leaf_node);
-
-        root.store(root_ptr, Ordering::Release);
-        leaf.store(leaf_ptr, Ordering::Release);
+        let root = BoxedAtomicPtr::new(root_node);
 
         let inner = Arc::new(Inner {
             root,
@@ -483,7 +471,6 @@ where
     }
 }
 
-#[derive(Default)]
 struct Inner<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
 where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
@@ -575,22 +562,9 @@ where
             let mut rhs_ptr_opt = None;
 
             if leaf_clone.should_split() {
-                let new_ptr = BoxedAtomicPtr::default();
+                let rhs_ptr = leaf_clone.split();
 
-                let (lhs, rhs) = leaf_clone.split(new_ptr);
-
-                assert!(!lhs.should_split());
-                assert!(!rhs.should_split());
-
-                let rhs_ptr = Box::into_raw(Box::new(rhs));
-
-                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
-
-                assert!(prev.is_null());
-
-                rhs_ptr_opt = Some(new_ptr);
-
-                leaf_clone = Box::new(lhs);
+                rhs_ptr_opt = Some(rhs_ptr);
             };
 
             assert!(!leaf_clone.should_split());
@@ -695,21 +669,9 @@ where
             let mut rhs_ptr_opt = None;
 
             if leaf_clone.should_split() {
-                let new_ptr = BoxedAtomicPtr::default();
+                let rhs_ptr = leaf_clone.split();
 
-                let (lhs, rhs) = leaf_clone.split(new_ptr);
-
-                assert!(!lhs.should_split());
-                assert!(!rhs.should_split());
-
-                let rhs_ptr = Box::into_raw(Box::new(rhs));
-
-                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
-                assert!(prev.is_null());
-
-                rhs_ptr_opt = Some(new_ptr);
-
-                leaf_clone = Box::new(lhs);
+                rhs_ptr_opt = Some(rhs_ptr);
             };
 
             assert!(!leaf_clone.should_split());
@@ -1021,22 +983,9 @@ where
                 // this is the consequence of using fixed-size arrays
                 // for storing items with no flexibility.
 
-                let new_ptr = BoxedAtomicPtr::default();
+                let rhs_ptr = left_sibling_clone.split();
 
-                let (lhs, rhs) = left_sibling_clone.split(new_ptr);
-
-                assert!(!lhs.should_split());
-                assert!(!rhs.should_split());
-
-                let rhs_ptr = Box::into_raw(Box::new(rhs));
-
-                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
-
-                assert!(prev.is_null());
-
-                rhs_ptr_opt = Some(new_ptr);
-
-                left_sibling_clone = Box::new(lhs);
+                rhs_ptr_opt = Some(rhs_ptr);
             };
 
             assert!(!left_sibling_clone.should_split());
@@ -1221,19 +1170,9 @@ where
                             let mut rhs_ptr_opt = None;
 
                             if parent_clone.should_split() {
-                                let new_ptr = BoxedAtomicPtr::default();
+                                let rhs_ptr = parent_clone.split();
 
-                                let (new_lhs, new_rhs) = parent_clone.split(new_ptr);
-
-                                let rhs_ptr = Box::into_raw(Box::new(new_rhs));
-
-                                let prev = new_ptr.swap(rhs_ptr, Ordering::Release);
-
-                                assert!(prev.is_null());
-
-                                rhs_ptr_opt = Some(new_ptr);
-
-                                parent_clone = Box::new(new_lhs);
+                                rhs_ptr_opt = Some(rhs_ptr);
                             };
 
                             if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
@@ -1248,8 +1187,9 @@ where
                         }
                     } else {
                         // root hoist
-                        let new_index_ptr = BoxedAtomicPtr::default();
-                        new_index_ptr.store(root_cursor.ptr.as_ptr(), Ordering::Release);
+                        let current_root_ptr: AtomicPtr<_> = root_cursor.ptr.as_ptr().into();
+                        let new_index_ptr =
+                            BoxedAtomicPtr(Box::into_raw(Box::new(current_root_ptr)));
 
                         let mut new_root_node = Node::<K, V, FANOUT>::new_root();
                         new_root_node
@@ -1505,10 +1445,7 @@ where
         }
     }
 
-    fn split(
-        mut self,
-        new_ptr: BoxedAtomicPtr<K, V, FANOUT>,
-    ) -> (Node<K, V, FANOUT>, Node<K, V, FANOUT>) {
+    fn split(&mut self) -> BoxedAtomicPtr<K, V, FANOUT> {
         assert!(!self.is_merging);
         assert!(self.merging_child.is_none());
 
@@ -1534,20 +1471,21 @@ where
         };
 
         let rhs_hi = std::mem::replace(&mut self.hi, Some(split_point.clone()));
-        let rhs_next = std::mem::replace(&mut self.next, Some(new_ptr));
 
-        let rhs = Node {
-            lo: split_point.clone(),
+        let rhs = BoxedAtomicPtr::new(Box::new(Node {
+            lo: split_point,
             hi: rhs_hi,
-            next: rhs_next,
+            next: self.next,
             data: rhs_data,
             merging_child: None,
             is_merging: false,
-        };
+        }));
 
-        assert!(self.hi == Some(split_point));
+        self.next = Some(rhs);
 
-        (self, rhs)
+        assert!(!self.should_split());
+
+        rhs
     }
 
     fn merge(&mut self, rhs: &NodeView<K, V, FANOUT>) {
@@ -1704,16 +1642,26 @@ fn concurrent_tree() {
             let i = unique_key(key);
             assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
         }
+        for key in 0_u16..n {
+            let i = unique_key(key);
+            assert_eq!(
+                tree.cas(i, Some(&i), Some(unique_key(key * 2))),
+                Ok(Some(i)),
+                "failed to get key {i}"
+            );
+        }
         let visible: std::collections::HashMap<u16, u16> = tree.iter().collect();
 
         for key in 0_u16..n {
             let i = unique_key(key);
-            assert_eq!(visible.get(&i).copied(), Some(i), "failed to get key {i}");
+            let v = unique_key(key * 2);
+            assert_eq!(visible.get(&i).copied(), Some(v), "failed to get key {i}");
         }
 
         for key in 0..n {
             let i = unique_key(key);
-            assert_eq!(tree.remove(&i), Some(i));
+            let v = unique_key(key * 2);
+            assert_eq!(tree.remove(&i), Some(v));
         }
         for key in 0..n {
             let i = unique_key(key);

@@ -53,13 +53,14 @@ mod alloc {
 
 #[test]
 fn leak_check() {
-    let n: u16 = 1024;
+    let n: u32 = 4096;
+
     let concurrency = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(8)
         * 2;
 
-    let run = |tree: ConcurrentMap<u16, u16, 8>, barrier: &std::sync::Barrier, low_bits| {
+    let run = |tree: ConcurrentMap<u32, u32, 8>, barrier: &std::sync::Barrier, low_bits| {
         let shift = concurrency.next_power_of_two().trailing_zeros();
         let unique_key = |key| (key << shift) | low_bits;
 
@@ -70,20 +71,30 @@ fn leak_check() {
             tree.insert(i, i);
             assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
         }
-        for key in 0_u16..n {
+        for key in 0_u32..n {
             let i = unique_key(key);
             assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
         }
-        let visible: std::collections::HashMap<u16, u16> = tree.iter().collect();
-
-        for key in 0_u16..n {
+        for key in 0_u32..n {
             let i = unique_key(key);
-            assert_eq!(visible.get(&i).copied(), Some(i), "failed to get key {i}");
+            assert_eq!(
+                tree.cas(i, Some(&i), Some(unique_key(key * 2))),
+                Ok(Some(i)),
+                "failed to get key {i}"
+            );
+        }
+        let visible: std::collections::HashMap<u32, u32> = tree.iter().collect();
+
+        for key in 0_u32..n {
+            let i = unique_key(key);
+            let v = unique_key(key * 2);
+            assert_eq!(visible.get(&i).copied(), Some(v), "failed to get key {i}");
         }
 
         for key in 0..n {
             let i = unique_key(key);
-            assert_eq!(tree.remove(&i), Some(i));
+            let v = unique_key(key * 2);
+            assert_eq!(tree.remove(&i), Some(v));
         }
         for key in 0..n {
             let i = unique_key(key);
@@ -94,17 +105,16 @@ fn leak_check() {
     let before = Instant::now();
     let resident_before = alloc::resident();
 
+    let tree = ConcurrentMap::default();
     std::thread::scope(|s| {
         for _ in 0..64 {
-            let tree = ConcurrentMap::default();
-
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency));
             let mut threads = vec![];
             for i in 0..concurrency {
                 let tree_2 = tree.clone();
                 let barrier_2 = barrier.clone();
 
-                let thread = s.spawn(move || run(tree_2, &barrier_2, u16::try_from(i).unwrap()));
+                let thread = s.spawn(move || run(tree_2, &barrier_2, u32::try_from(i).unwrap()));
                 threads.push(thread);
             }
             for thread in threads {
@@ -112,6 +122,8 @@ fn leak_check() {
             }
         }
     });
+
+    drop(tree);
 
     let resident_after = alloc::resident();
 
