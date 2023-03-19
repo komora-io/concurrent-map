@@ -100,6 +100,37 @@
 //! performance, you may find a better option among one of the many concurrent
 //! hashmap implementations that are floating around.
 
+#[cfg(not(feature = "fault_injection"))]
+#[inline]
+const fn debug_delay() -> bool {
+    false
+}
+
+/// This function is useful for inducing random jitter into
+/// our atomic operations, shaking out more possible
+/// interleavings quickly. It gets fully eliminated by the
+/// compiler in non-test code.
+#[cfg(feature = "fault_injection")]
+fn debug_delay() -> bool {
+    use std::thread;
+    use std::time::Duration;
+
+    use rand::{thread_rng, Rng};
+
+    let mut rng = thread_rng();
+
+    match rng.gen_range(0..100) {
+        0..=98 => {
+            //thread::yield_now();
+            false
+        }
+        _ => {
+            //thread::sleep(Duration::from_millis(1));
+            true
+        }
+    }
+}
+
 use stack_map::StackMap;
 
 use std::borrow::Borrow;
@@ -254,16 +285,19 @@ where
         replacement: Box<Node<K, V, FANOUT>>,
         guard: &mut Guard<'_, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> Result<NodeView<K, V, FANOUT>, Option<NodeView<K, V, FANOUT>>> {
-        // println!("replacing:");
-        // println!("nodeview:     {:?}", *self);
-        // println!("current:      {:?}", **self);
-        // println!("new:          {:?}", *replacement);
         assert!(
             !(replacement.hi.is_some() ^ replacement.next.is_some()),
             "hi and next must both either be None or Some"
         );
-        let replacement_ptr = Box::into_raw(replacement);
 
+        if debug_delay() {
+            return Err(Some(NodeView {
+                ptr: self.ptr,
+                id: self.id,
+            }));
+        }
+
+        let replacement_ptr = Box::into_raw(replacement);
         let res = self.id.compare_exchange(
             self.ptr.as_ptr(),
             replacement_ptr,
@@ -510,11 +544,37 @@ where
             cursor = child_ptr.node_view(&mut guard).unwrap();
         }
 
+        let mut layer = 0;
         for lhs_ptr in lhs_chain {
+            layer += 1;
+
+            let mut min_fill_physical: f64 = 1.0;
+            let mut max_fill_physical: f64 = 0.0;
+            let mut fill_sum_physical: f64 = 0.0;
+
+            let mut min_fill_logical: f64 = 1.0;
+            let mut max_fill_logical: f64 = 0.0;
+            let mut fill_sum_logical: f64 = 0.0;
+            let mut nodes_counted: usize = 0;
+
             let mut next_opt: Option<BoxedAtomicPtr<K, V, FANOUT>> = Some(lhs_ptr);
             while let Some(next) = next_opt {
                 assert!(!next.0.is_null());
                 let sibling_cursor = next.node_view(&mut guard).unwrap();
+
+                let fill_phy = ((std::mem::size_of::<K>() + std::mem::size_of::<V>())
+                    * sibling_cursor.len()) as f64
+                    / std::mem::size_of::<Node<K, V, FANOUT>>() as f64;
+                min_fill_physical = min_fill_physical.min(fill_phy);
+                max_fill_physical = max_fill_physical.max(fill_phy);
+                fill_sum_physical += fill_phy;
+
+                let fill_log = sibling_cursor.len() as f64 / FANOUT as f64;
+                min_fill_logical = min_fill_logical.min(fill_log);
+                max_fill_logical = max_fill_logical.max(fill_log);
+                fill_sum_logical += fill_log;
+                nodes_counted += 1;
+
                 next_opt = sibling_cursor.next;
                 let node_box = unsafe { Box::from_raw(sibling_cursor.ptr.as_ptr()) };
                 drop(node_box);
@@ -522,6 +582,18 @@ where
                 let reclaimed_ptr: Box<AtomicPtr<Node<K, V, FANOUT>>> =
                     unsafe { Box::from_raw(next.0 as *mut _) };
                 drop(reclaimed_ptr);
+            }
+
+            if cfg!(feature = "print_utilization_on_drop") {
+                println!("layer {layer} count {nodes_counted}");
+                println!(
+                    "logical: min: {min_fill_logical} max: {max_fill_logical} avg: {}",
+                    fill_sum_logical / nodes_counted as f64
+                );
+                println!(
+                    "physical: min: {min_fill_physical} max: {max_fill_physical} avg: {}",
+                    fill_sum_physical / nodes_counted as f64
+                );
             }
         }
     }
@@ -559,15 +631,11 @@ where
             );
             let ret = leaf_clone.insert(key.clone(), value.clone());
 
-            let mut rhs_ptr_opt = None;
-
-            if leaf_clone.should_split() {
-                let rhs_ptr = leaf_clone.split();
-
-                rhs_ptr_opt = Some(rhs_ptr);
+            let rhs_ptr_opt = if leaf_clone.should_split() {
+                Some(leaf_clone.split())
+            } else {
+                None
             };
-
-            assert!(!leaf_clone.should_split());
 
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
 
@@ -666,15 +734,11 @@ where
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.cas(key.clone(), old, new.clone());
 
-            let mut rhs_ptr_opt = None;
-
-            if leaf_clone.should_split() {
-                let rhs_ptr = leaf_clone.split();
-
-                rhs_ptr_opt = Some(rhs_ptr);
+            let rhs_ptr_opt = if leaf_clone.should_split() {
+                Some(leaf_clone.split())
+            } else {
+                None
             };
-
-            assert!(!leaf_clone.should_split());
 
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
 
@@ -976,19 +1040,15 @@ where
             let mut left_sibling_clone: Box<Node<K, V, FANOUT>> = Box::new((*left_sibling).clone());
             left_sibling_clone.merge(child);
 
-            let mut rhs_ptr_opt = None;
-
-            if left_sibling_clone.should_split() {
+            let rhs_ptr_opt = if left_sibling_clone.should_split() {
                 // we have to try to split the sibling, funny enough.
                 // this is the consequence of using fixed-size arrays
                 // for storing items with no flexibility.
 
-                let rhs_ptr = left_sibling_clone.split();
-
-                rhs_ptr_opt = Some(rhs_ptr);
+                Some(left_sibling_clone.split())
+            } else {
+                None
             };
-
-            assert!(!left_sibling_clone.should_split());
 
             let cas_result = left_sibling.cas(left_sibling_clone, guard);
             if let (Err(_), Some(rhs_ptr)) = (&cas_result, rhs_ptr_opt) {
@@ -1167,12 +1227,10 @@ where
                             assert!(!parent_clone.is_leaf());
                             parent_clone.index_mut().insert(rhs.lo.clone(), next);
 
-                            let mut rhs_ptr_opt = None;
-
-                            if parent_clone.should_split() {
-                                let rhs_ptr = parent_clone.split();
-
-                                rhs_ptr_opt = Some(rhs_ptr);
+                            let rhs_ptr_opt = if parent_clone.should_split() {
+                                Some(parent_clone.split())
+                            } else {
+                                None
                             };
 
                             if let Ok(new_parent_view) = parent_cursor.cas(parent_clone, guard) {
@@ -1198,16 +1256,18 @@ where
                         new_root_node.index_mut().insert(rhs.lo.clone(), next);
                         let new_root_ptr = Box::into_raw(new_root_node);
 
-                        if self
-                            .root
-                            .compare_exchange(
-                                root_cursor.ptr.as_ptr(),
-                                new_root_ptr,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
-                            .is_ok()
-                        {
+                        let worked = !debug_delay()
+                            && self
+                                .root
+                                .compare_exchange(
+                                    root_cursor.ptr.as_ptr(),
+                                    new_root_ptr,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok();
+
+                        if worked {
                             let parent_view = NodeView {
                                 id: self.root,
                                 ptr: NonNull::new(new_root_ptr).unwrap(),
@@ -1257,6 +1317,7 @@ where
 }
 
 #[derive(Debug, Clone)]
+#[repr(u8)]
 enum Data<K, V, const FANOUT: usize>
 where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
@@ -1264,6 +1325,19 @@ where
 {
     Leaf(StackMap<K, V, FANOUT>),
     Index(StackMap<K, BoxedAtomicPtr<K, V, FANOUT>, FANOUT>),
+}
+
+impl<K, V, const FANOUT: usize> Data<K, V, FANOUT>
+where
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
+{
+    const fn len(&self) -> usize {
+        match self {
+            Data::Leaf(ref leaf) => leaf.len(),
+            Data::Index(ref index) => index.len(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1439,10 +1513,7 @@ where
     }
 
     const fn len(&self) -> usize {
-        match self.data {
-            Data::Leaf(ref leaf) => leaf.len(),
-            Data::Index(ref index) => index.len(),
-        }
+        self.data.len()
     }
 
     fn split(&mut self) -> BoxedAtomicPtr<K, V, FANOUT> {
@@ -1469,6 +1540,8 @@ where
                 (split_point, Data::Index(rhs_index))
             }
         };
+
+        assert!(rhs_data.len() < FANOUT - MERGE_SIZE);
 
         let rhs_hi = std::mem::replace(&mut self.hi, Some(split_point.clone()));
 
@@ -1704,9 +1777,10 @@ fn big_scan() {
             }
             let insert_elapsed = insert.elapsed();
             println!(
-                "{} inserts/s, total {:?}",
+                "{} inserts/s, total {} in {:?}",
                 (u64::from(stride) * 1000)
                     / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
+                stop_fill - start_fill,
                 insert_elapsed
             );
         };
@@ -1717,10 +1791,10 @@ fn big_scan() {
         let count = tree.range(..).take(stride as _).count();
         assert_eq!(count, stride as _);
         let scan_elapsed = scan.elapsed();
+        let scan_micros = scan_elapsed.as_micros().max(1) as f64;
         println!(
             "{} scanned items/s, total {:?}",
-            (u64::from(stride) * 1000)
-                / u64::try_from(scan_elapsed.as_millis().max(1)).unwrap_or(u64::MAX),
+            ((f64::from(stride) * 1_000_000.0) / scan_micros) as u64,
             scan_elapsed
         );
     };

@@ -53,14 +53,14 @@ mod alloc {
 
 #[test]
 fn leak_check() {
-    let n: u32 = 4096;
+    let n: u32 = 16 * 1024;
 
     let concurrency = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(8)
         * 2;
 
-    let run = |tree: ConcurrentMap<u32, u32, 8>, barrier: &std::sync::Barrier, low_bits| {
+    let run = |tree: ConcurrentMap<u32, u32, 5>, barrier: &std::sync::Barrier, low_bits| {
         let shift = concurrency.next_power_of_two().trailing_zeros();
         let unique_key = |key| (key << shift) | low_bits;
 
