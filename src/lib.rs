@@ -387,6 +387,10 @@ macro_rules! impl_integer {
 
 impl_integer!(usize, u8, u16, u32, u64, u128, isize, i8, i16, i32, i64, i128);
 
+impl<T: Ord> Minimum for Vec<T> {
+    const MIN: Self = Vec::new();
+}
+
 impl<T: Ord> Minimum for &[T] {
     const MIN: Self = &[];
 }
