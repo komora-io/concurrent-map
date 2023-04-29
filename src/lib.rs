@@ -332,7 +332,7 @@ where
     }
 }
 
-impl<'a, K, V, const FANOUT: usize> Deref for NodeView<K, V, FANOUT>
+impl<K, V, const FANOUT: usize> Deref for NodeView<K, V, FANOUT>
 where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
@@ -1050,6 +1050,12 @@ where
     /// operations complete their atomic modifications to the shared map.
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Relaxed)
+    }
+
+    /// A **lagging**, eventually-consistent check for emptiness, based on the correspondingly
+    /// non-atomic `len` method.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Iterate over the tree.
