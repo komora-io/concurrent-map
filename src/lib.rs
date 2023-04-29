@@ -2032,6 +2032,23 @@ where
     }
 }
 
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> FromIterator<(K, V)>
+    for ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
+where
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
+{
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let map = ConcurrentMap::default();
+
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+
+        map
+    }
+}
+
 impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> IntoIterator
     for &'a ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
