@@ -1128,28 +1128,26 @@ where
         let current = self.inner.leaf_for_key(LeafSearch::Eq(start), &mut guard);
         let current_back = self.inner.leaf_for_key(end, &mut guard);
 
-        // TODO can we set this to 0 for simplicity?
-        let next_index = current
-            .leaf()
-            .iter()
-            .position(|(k, _v)| range.contains(k))
-            .unwrap_or(0);
-
-        let next_index_from_back = 0;
-
         Iter {
             guard,
             inner: &self.inner,
             range,
             current,
-            next_index,
             current_back,
-            next_index_from_back,
+            next_index: 0,
+            next_index_from_back: 0,
         }
     }
 }
 
-/// An iterator over a [`ConcurrentMap`].
+/// An iterator over a [`ConcurrentMap`]. Note that this is
+/// not an atomic snapshot of the overall shared state, but
+/// it will contain any data that existed before the iterator
+/// was created.
+///
+/// Note that this iterator contains an epoch-based reclamation
+/// guard, and the overall concurrent structure will be unable
+/// to free any memory until this iterator drops again.
 pub struct Iter<
     'a,
     K,
@@ -1573,15 +1571,8 @@ where
             }
 
             match search {
-                LeafSearch::Eq(k) => assert!(k >= cursor.lo.borrow()),
-                LeafSearch::Lt(_) => {
-                    // TODO unclear what specific invariants apply at this point
-                    //todo!("figure out invariant"),
-                }
-                LeafSearch::Max => {
-                    // TODO not correct because may have split after parent access
-                    //assert!(cursor.hi.is_none()),
-                }
+                LeafSearch::Eq(k) | LeafSearch::Lt(k) => assert!(k >= cursor.lo.borrow()),
+                LeafSearch::Max => {}
             }
 
             if let Some(hi) = &cursor.hi {
@@ -1674,9 +1665,7 @@ where
                 if let Some(ref hi) = cursor.hi {
                     match search {
                         LeafSearch::Eq(k) => assert!(k < hi.borrow()),
-                        LeafSearch::Lt(k) => {
-                            // TODO
-                        }
+                        LeafSearch::Lt(k) => assert!(k <= hi.borrow()),
                         LeafSearch::Max => {
                             unreachable!("leaf should have no hi key if we're searching for Max")
                         }
