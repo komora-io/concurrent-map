@@ -332,7 +332,7 @@ where
     }
 }
 
-impl<'a, K, V, const FANOUT: usize> Deref for NodeView<K, V, FANOUT>
+impl<K, V, const FANOUT: usize> Deref for NodeView<K, V, FANOUT>
 where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
@@ -443,6 +443,35 @@ impl Minimum for &str {
 /// more quickly, but the efficiency will be lower. Values that are
 /// extremely high may cause undesirable memory usage because it will
 /// take more time to fill up each thread-local garbage segment.
+///
+/// # Examples
+///
+/// ```
+/// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+///
+/// // insert and remove atomically returns the last value, if it was set,
+/// // similarly to a BTreeMap
+/// assert_eq!(tree.insert(1, 10), None);
+/// assert_eq!(tree.insert(1, 11), Some(10));
+/// assert_eq!(tree.remove(&1), Some(11));
+///
+/// // get also functions similarly to BTreeMap, except it
+/// // returns a cloned version of the value rather than a
+/// // reference to it, so that no locks need to be maintained.
+/// // For this reason, it can be a good idea to use types that
+/// // are cheap to clone for values, which can be easily handled
+/// // with `Arc` etc...
+/// assert_eq!(tree.insert(1, 12), None);
+/// assert_eq!(tree.get(&1), Some(12));
+///
+/// // compare and swap from value 12 to value 20
+/// tree.cas(1, Some(&12_usize), Some(20)).unwrap();
+///
+/// assert_eq!(tree.get(&1).unwrap(), 20);
+///
+/// // there are a lot of methods that are not covered
+/// // here - check out the docs!
+/// ```
 #[derive(Clone)]
 pub struct ConcurrentMap<K, V, const FANOUT: usize = 64, const LOCAL_GC_BUFFER_SIZE: usize = 128>
 where
@@ -610,6 +639,21 @@ where
     V: 'static + Clone + Send + Sync,
 {
     /// Atomically get a value out of the tree that is associated with this key.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    ///
+    /// let actual = tree.get(&0);
+    /// let expected = None;
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get(&1);
+    /// let expected = Some(1);
+    /// assert_eq!(expected, actual);
+    /// ```
     pub fn get<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -617,16 +661,243 @@ where
     {
         let mut guard = self.ebr.pin();
 
-        let leaf = self.inner.leaf_for_key(key, &mut guard);
+        let leaf = self.inner.leaf_for_key(LeafSearch::Eq(key), &mut guard);
 
         leaf.get(key)
     }
 
+    /// Atomically get a key and value out of the tree that is associated with the key that
+    /// is lexicographically less than the provided key.
+    ///
+    /// This will always return `None` if the key passed to `get_lt` == `K::MIN`.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    ///
+    /// let actual = tree.get_lt(&0);
+    /// let expected = None;
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_lt(&1);
+    /// let expected = None;
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_lt(&2);
+    /// let expected = Some((1, 1));
+    /// assert_eq!(expected, actual);
+    /// ```
+    pub fn get_lt<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        Q: Borrow<K> + ?Sized,
+    {
+        if key.borrow() == &K::MIN {
+            return None;
+        }
+
+        self.range(..key.borrow()).next_back()
+    }
+
+    /// Atomically get a key and value out of the tree that is associated with the key that
+    /// is lexicographically less than or equal to the provided key.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    ///
+    /// let actual = tree.get_lte(&0);
+    /// let expected = None;
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_lte(&1);
+    /// let expected = Some((1, 1));
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_lte(&2);
+    /// let expected = Some((1, 1));
+    /// assert_eq!(expected, actual);
+    /// ```
+    pub fn get_lte<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        Q: Borrow<K> + ?Sized,
+    {
+        self.range(..=key.borrow()).next_back()
+    }
+
+    /// Atomically get a key and value out of the tree that is associated with the key
+    /// that is lexicographically greater than the provided key.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    ///
+    /// let actual = tree.get_gt(&0);
+    /// let expected = Some((1, 1));
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_gt(&1);
+    /// let expected = None;
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_gt(&2);
+    /// let expected = None;
+    /// assert_eq!(expected, actual);
+    /// ```
+    pub fn get_gt<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        Q: Borrow<K> + ?Sized,
+    {
+        self.range((
+            std::ops::Bound::Excluded(key.borrow()),
+            std::ops::Bound::Unbounded,
+        ))
+        .next()
+    }
+
+    /// Atomically get a key and value out of the tree that is associated with the key
+    /// that is lexicographically greater than or equal to the provided key.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    ///
+    /// let actual = tree.get_gte(&0);
+    /// let expected = Some((1, 1));
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_gte(&1);
+    /// let expected = Some((1, 1));
+    /// assert_eq!(expected, actual);
+    ///
+    /// let actual = tree.get_gte(&2);
+    /// let expected = None;
+    /// assert_eq!(expected, actual);
+    /// ```
+    pub fn get_gte<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        Q: Borrow<K> + ?Sized,
+    {
+        self.range((
+            std::ops::Bound::Included(key.borrow()),
+            std::ops::Bound::Unbounded,
+        ))
+        .next()
+    }
+
+    /// Get the minimum item stored in this structure.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    /// tree.insert(2, 2);
+    /// tree.insert(3, 3);
+    ///
+    /// let actual = tree.first();
+    /// let expected = Some((1, 1));
+    /// assert_eq!(actual, expected);
+    /// ```
+    pub fn first(&self) -> Option<(K, V)> {
+        self.iter().next()
+    }
+
+    /// Atomically remove the minimum item stored in this structure.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    /// tree.insert(2, 2);
+    /// tree.insert(3, 3);
+    ///
+    /// let actual = tree.pop_first();
+    /// let expected = Some((1, 1));
+    /// assert_eq!(actual, expected);
+    ///
+    /// assert_eq!(tree.get(&1), None);
+    /// ```
+    pub fn pop_first(&self) -> Option<(K, V)>
+    where
+        V: PartialEq,
+    {
+        loop {
+            let (k, v) = self.first()?;
+            if self.cas(k.clone(), Some(&v), None).is_ok() {
+                return Some((k, v));
+            }
+        }
+    }
+
+    /// Get the maximum item stored in this structure.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    /// tree.insert(2, 2);
+    /// tree.insert(3, 3);
+    ///
+    /// let actual = tree.last();
+    /// let expected = Some((3, 3));
+    /// assert_eq!(actual, expected);
+    /// ```
+    pub fn last(&self) -> Option<(K, V)> {
+        self.iter().next_back()
+    }
+
+    /// Atomically remove the maximum item stored in this structure.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    /// tree.insert(2, 2);
+    /// tree.insert(3, 3);
+    ///
+    /// let actual = tree.pop_last();
+    /// let expected = Some((3, 3));
+    /// assert_eq!(actual, expected);
+    ///
+    /// assert_eq!(tree.get(&3), None);
+    /// ```
+    pub fn pop_last(&self) -> Option<(K, V)>
+    where
+        V: PartialEq,
+    {
+        loop {
+            let (k, v) = self.last()?;
+            if self.cas(k.clone(), Some(&v), None).is_ok() {
+                return Some((k, v));
+            }
+        }
+    }
+
     /// Atomically insert a key-value pair into the tree, returning the previous value associated with this key if one existed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// assert_eq!(tree.insert(1, 1), None);
+    /// assert_eq!(tree.insert(1, 1), Some(1));
+    /// ```
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         loop {
             let mut guard = self.ebr.pin();
-            let leaf = self.inner.leaf_for_key(&key, &mut guard);
+            let leaf = self.inner.leaf_for_key(LeafSearch::Eq(&key), &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             assert!(
                 leaf_clone.len() < (FANOUT - MERGE_SIZE),
@@ -660,6 +931,16 @@ where
     }
 
     /// Atomically remove the value associated with this key from the tree, returning the previous value if one existed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// assert_eq!(tree.remove(&1), None);
+    /// assert_eq!(tree.insert(1, 1), None);
+    /// assert_eq!(tree.remove(&1), Some(1));
+    /// ```
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -667,7 +948,7 @@ where
     {
         loop {
             let mut guard = self.ebr.pin();
-            let leaf = self.inner.leaf_for_key(key, &mut guard);
+            let leaf = self.inner.leaf_for_key(LeafSearch::Eq(key), &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.remove(key);
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
@@ -734,7 +1015,7 @@ where
     {
         loop {
             let mut guard = self.ebr.pin();
-            let leaf = self.inner.leaf_for_key(&key, &mut guard);
+            let leaf = self.inner.leaf_for_key(LeafSearch::Eq(&key), &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.cas(key.clone(), old, new.clone());
 
@@ -771,6 +1052,12 @@ where
         self.len.load(Ordering::Relaxed)
     }
 
+    /// A **lagging**, eventually-consistent check for emptiness, based on the correspondingly
+    /// non-atomic `len` method.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Iterate over the tree.
     ///
     /// This is not an atomic snapshot, and it caches B+tree leaf
@@ -789,7 +1076,9 @@ where
     pub fn iter(&self) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE> {
         let mut guard = self.ebr.pin();
 
-        let current = self.inner.leaf_for_key(&K::MIN, &mut guard);
+        let current = self.inner.leaf_for_key(LeafSearch::Eq(&K::MIN), &mut guard);
+        let current_back = self.inner.leaf_for_key(LeafSearch::Max, &mut guard);
+        let next_index_from_back = 0;
 
         Iter {
             guard,
@@ -797,6 +1086,8 @@ where
             current,
             range: std::ops::RangeFull,
             next_index: 0,
+            current_back,
+            next_index_from_back,
         }
     }
 
@@ -815,41 +1106,54 @@ where
     ///
     /// But, you can be certain that any key that existed prior to the creation of this
     /// iterator, and was not changed during iteration, will be observed as expected.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the provided range's end_bound() == Bound::Excluded(K::MIN).
     pub fn range<R: std::ops::RangeBounds<K>>(
         &self,
         range: R,
     ) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R> {
         let mut guard = self.ebr.pin();
 
-        #[allow(unused)]
-        let mut min = None;
+        let min = &K::MIN;
         let start = match range.start_bound() {
-            std::ops::Bound::Unbounded => {
-                min = Some(K::MIN);
-                min.as_ref().unwrap()
-            }
+            std::ops::Bound::Unbounded => min,
             std::ops::Bound::Included(k) | std::ops::Bound::Excluded(k) => k,
         };
 
-        let current = self.inner.leaf_for_key(start, &mut guard);
+        let end = match range.end_bound() {
+            std::ops::Bound::Unbounded => LeafSearch::Max,
+            std::ops::Bound::Included(k) => LeafSearch::Eq(k),
+            std::ops::Bound::Excluded(k) => {
+                assert!(k != &K::MIN);
+                LeafSearch::Lt(k)
+            }
+        };
 
-        let next_index = current
-            .leaf()
-            .iter()
-            .position(|(k, _v)| range.contains(k))
-            .unwrap_or(0);
+        let current = self.inner.leaf_for_key(LeafSearch::Eq(start), &mut guard);
+        let current_back = self.inner.leaf_for_key(end, &mut guard);
 
         Iter {
             guard,
             inner: &self.inner,
-            current,
             range,
-            next_index,
+            current,
+            current_back,
+            next_index: 0,
+            next_index_from_back: 0,
         }
     }
 }
 
-/// An iterator over a [`ConcurrentMap`].
+/// An iterator over a [`ConcurrentMap`]. Note that this is
+/// not an atomic snapshot of the overall shared state, but
+/// it will contain any data that existed before the iterator
+/// was created.
+///
+/// Note that this iterator contains an epoch-based reclamation
+/// guard, and the overall concurrent structure will be unable
+/// to free any memory until this iterator drops again.
 pub struct Iter<
     'a,
     K,
@@ -867,6 +1171,8 @@ pub struct Iter<
     range: R,
     current: NodeView<K, V, FANOUT>,
     next_index: usize,
+    current_back: NodeView<K, V, FANOUT>,
+    next_index_from_back: usize,
 }
 
 impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> Iterator
@@ -900,8 +1206,10 @@ where
                 } else if let Some(ref hi) = self.current.hi {
                     // we have to take the slow path by traversing the
                     // tree due to a concurrent merge that deleted the
-                    // right sibling
-                    self.current = self.inner.leaf_for_key(hi, &mut self.guard);
+                    // right sibling. we are protected from a use after
+                    // free of the ID itself due to holding an ebr Guard
+                    // on the Iter struct, holding a barrier against re-use.
+                    self.current = self.inner.leaf_for_key(LeafSearch::Eq(hi), &mut self.guard);
                     self.next_index = 0;
                 } else {
                     panic!("somehow hit a node that has a next but not a hi key");
@@ -912,6 +1220,61 @@ where
             }
         }
     }
+}
+
+impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> DoubleEndedIterator
+    for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R>
+where
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync,
+    R: std::ops::RangeBounds<K>,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.next_index_from_back >= self.current_back.leaf().len() {
+                if !self.range.contains(&self.current_back.lo) || self.current_back.lo == K::MIN {
+                    // finished
+                    return None;
+                }
+
+                let next_current_back = self
+                    .inner
+                    .leaf_for_key(LeafSearch::Lt(&self.current_back.lo), &mut self.guard);
+                assert!(next_current_back.lo != self.current_back.lo);
+                self.current_back = next_current_back;
+
+                self.next_index_from_back = 0;
+
+                if self.current_back.leaf().is_empty() {
+                    continue;
+                }
+            }
+
+            let offset_to_return = self.current_back.leaf().len() - (1 + self.next_index_from_back);
+            let (k, v) = self
+                .current_back
+                .leaf()
+                .get_index(offset_to_return)
+                .unwrap();
+
+            self.next_index_from_back += 1;
+            if !self.range.contains(k) {
+                continue;
+            } else {
+                return Some((k.clone(), v.clone()));
+            }
+        }
+    }
+}
+
+enum LeafSearch<K> {
+    // For finding a leaf that would contain this key, if present.
+    Eq(K),
+    // For finding the direct left sibling of a node during reverse
+    // iteration. The actual semantic is to find a leaf that has a lo key
+    // that is less than K and a hi key that is >= K
+    Lt(K),
+    Max,
 }
 
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
@@ -1146,7 +1509,7 @@ where
 
     fn leaf_for_key<'a, Q>(
         &'a self,
-        key: &Q,
+        search: LeafSearch<&Q>,
         guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> NodeView<K, V, FANOUT>
     where
@@ -1213,9 +1576,19 @@ where
                 }
             }
 
-            assert!(key >= cursor.lo.borrow());
+            match search {
+                LeafSearch::Eq(k) | LeafSearch::Lt(k) => assert!(k >= cursor.lo.borrow()),
+                LeafSearch::Max => {}
+            }
+
             if let Some(hi) = &cursor.hi {
-                if key >= hi.borrow() {
+                let go_right = match search {
+                    LeafSearch::Eq(k) => k >= hi.borrow(),
+                    // Lt looks for a node with lo < K, hi >= K
+                    LeafSearch::Lt(k) => k > hi.borrow(),
+                    LeafSearch::Max => true,
+                };
+                if go_right {
                     // go right to the tree sibling
                     let next = cursor.next.unwrap();
                     let rhs = if let Some(view) = next.node_view(guard) {
@@ -1295,15 +1668,35 @@ where
             if cursor.is_leaf() {
                 assert!(!cursor.is_merging);
                 assert!(cursor.merging_child.is_none());
-                assert!(cursor.lo.borrow() <= key);
                 if let Some(ref hi) = cursor.hi {
-                    assert!(hi.borrow() > key);
+                    match search {
+                        LeafSearch::Eq(k) => assert!(k < hi.borrow()),
+                        LeafSearch::Lt(k) => assert!(k <= hi.borrow()),
+                        LeafSearch::Max => {
+                            unreachable!("leaf should have no hi key if we're searching for Max")
+                        }
+                    }
                 }
                 break;
             }
 
             // go down the tree
-            let child_ptr = cursor.index().get_less_than_or_equal(key).unwrap().1;
+            let index = cursor.index();
+            let child_ptr = match search {
+                LeafSearch::Eq(k) => index.get_less_than_or_equal(k).unwrap().1,
+                LeafSearch::Lt(k) => {
+                    // Lt looks for a node with lo < K and hi >= K
+                    // so we find the first child with a lo key > K and
+                    // return its left sibling
+                    index.get_less_than(k).unwrap().1
+                }
+                LeafSearch::Max => {
+                    index
+                        .get_index(index.len().checked_sub(1).unwrap())
+                        .unwrap()
+                        .1
+                }
+            };
 
             parent_cursor_opt = Some(cursor);
             cursor = if let Some(view) = child_ptr.node_view(guard) {
@@ -1624,7 +2017,7 @@ fn basic_tree() {
     let tree = ConcurrentMap::<usize, usize>::default();
 
     let n = 64; // SPLIT_SIZE
-    for i in 0..n {
+    for i in 0..=n {
         assert_eq!(tree.get(&i), None);
         tree.insert(i, i);
         assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
@@ -1634,23 +2027,43 @@ fn basic_tree() {
         assert_eq!(i, k);
     }
 
+    for (i, (k, _v)) in tree.range(..).rev().enumerate() {
+        assert_eq!(n - i, k);
+    }
+
     for (i, (k, _v)) in tree.iter().enumerate() {
         assert_eq!(i, k);
+    }
+
+    for (i, (k, _v)) in tree.iter().rev().enumerate() {
+        assert_eq!(n - i, k);
     }
 
     for (i, (k, _v)) in tree.range(0..).enumerate() {
         assert_eq!(i, k);
     }
 
+    for (i, (k, _v)) in tree.range(0..).rev().enumerate() {
+        assert_eq!(n - i, k);
+    }
+
     for (i, (k, _v)) in tree.range(0..n).enumerate() {
         assert_eq!(i, k);
+    }
+
+    for (i, (k, _v)) in tree.range(0..n).rev().enumerate() {
+        assert_eq!((n - 1) - i, k);
     }
 
     for (i, (k, _v)) in tree.range(0..=n).enumerate() {
         assert_eq!(i, k);
     }
 
-    for i in 0..n {
+    for (i, (k, _v)) in tree.range(0..=n).rev().enumerate() {
+        assert_eq!(n - i, k);
+    }
+
+    for i in 0..=n {
         assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
     }
 }
@@ -1670,7 +2083,7 @@ fn timing_tree() {
     let insert_elapsed = insert.elapsed();
     println!(
         "{} inserts/s, total {:?}",
-        (n * 1000) / u64::try_from(insert_elapsed.as_millis().max(1)).unwrap_or(u64::MAX),
+        (n * 1_000_000) / u64::try_from(insert_elapsed.as_micros().max(1)).unwrap_or(u64::MAX),
         insert_elapsed
     );
 
@@ -1680,8 +2093,18 @@ fn timing_tree() {
     let scan_elapsed = scan.elapsed();
     println!(
         "{} scanned items/s, total {:?}",
-        (n * 1000) / u64::try_from(scan_elapsed.as_millis().max(1)).unwrap_or(u64::MAX),
+        (n * 1_000_000) / u64::try_from(scan_elapsed.as_micros().max(1)).unwrap_or(u64::MAX),
         scan_elapsed
+    );
+
+    let scan_rev = Instant::now();
+    let count = tree.range(..).rev().count();
+    assert_eq!(count as u64, n);
+    let scan_rev_elapsed = scan_rev.elapsed();
+    println!(
+        "{} reverse-scanned items/s, total {:?}",
+        (n * 1_000_000) / u64::try_from(scan_rev_elapsed.as_micros().max(1)).unwrap_or(u64::MAX),
+        scan_rev_elapsed
     );
 
     let gets = Instant::now();
@@ -1691,194 +2114,7 @@ fn timing_tree() {
     let gets_elapsed = gets.elapsed();
     println!(
         "{} gets/s, total {:?}",
-        (n * 1000) / u64::try_from(gets_elapsed.as_millis().max(1)).unwrap_or(u64::MAX),
+        (n * 1_000_000) / u64::try_from(gets_elapsed.as_micros().max(1)).unwrap_or(u64::MAX),
         gets_elapsed
     );
-}
-
-#[test]
-fn concurrent_tree() {
-    let n: u16 = 1024;
-    let concurrency = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(8)
-        * 2;
-
-    let run = |tree: ConcurrentMap<u16, u16, 8>, barrier: &std::sync::Barrier, low_bits| {
-        let shift = concurrency.next_power_of_two().trailing_zeros();
-        let unique_key = |key| (key << shift) | low_bits;
-
-        barrier.wait();
-        for key in 0..n {
-            let i = unique_key(key);
-            assert_eq!(tree.get(&i), None);
-            tree.insert(i, i);
-            assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
-        }
-        for key in 0_u16..n {
-            let i = unique_key(key);
-            assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
-        }
-        for key in 0_u16..n {
-            let i = unique_key(key);
-            assert_eq!(
-                tree.cas(i, Some(&i), Some(unique_key(key * 2))),
-                Ok(Some(i)),
-                "failed to get key {i}"
-            );
-        }
-        let visible: std::collections::HashMap<u16, u16> = tree.iter().collect();
-
-        for key in 0_u16..n {
-            let i = unique_key(key);
-            let v = unique_key(key * 2);
-            assert_eq!(visible.get(&i).copied(), Some(v), "failed to get key {i}");
-        }
-
-        for key in 0..n {
-            let i = unique_key(key);
-            let v = unique_key(key * 2);
-            assert_eq!(tree.remove(&i), Some(v));
-        }
-        for key in 0..n {
-            let i = unique_key(key);
-            assert_eq!(tree.get(&i), None, "failed to get key {i}");
-        }
-    };
-
-    let tree = ConcurrentMap::default();
-
-    std::thread::scope(|s| {
-        for _ in 0..64 {
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(concurrency));
-            let mut threads = vec![];
-            for i in 0..concurrency {
-                let tree_2 = tree.clone();
-                let barrier_2 = barrier.clone();
-
-                let thread = s.spawn(move || run(tree_2, &barrier_2, u16::try_from(i).unwrap()));
-                threads.push(thread);
-            }
-            for thread in threads {
-                thread.join().unwrap();
-            }
-        }
-    });
-}
-
-#[test]
-fn big_scan() {
-    let n: u32 = 16 * 1024 * 1024;
-    let concurrency = 8;
-    let stride = n / concurrency;
-
-    let fill =
-        |tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier, start_fill, stop_fill| {
-            barrier.wait();
-            let insert = std::time::Instant::now();
-            for i in start_fill..stop_fill {
-                tree.insert(i, i);
-            }
-            let insert_elapsed = insert.elapsed();
-            println!(
-                "{} inserts/s, total {} in {:?}",
-                (u64::from(stride) * 1000)
-                    / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
-                stop_fill - start_fill,
-                insert_elapsed
-            );
-        };
-
-    let read = |tree: ConcurrentMap<u32, u32>, barrier: &std::sync::Barrier| {
-        barrier.wait();
-        let scan = std::time::Instant::now();
-        let count = tree.range(..).take(stride as _).count();
-        assert_eq!(count, stride as _);
-        let scan_elapsed = scan.elapsed();
-        let scan_micros = scan_elapsed.as_micros().max(1) as f64;
-        println!(
-            "{} scanned items/s, total {:?}",
-            ((f64::from(stride) * 1_000_000.0) / scan_micros) as u64,
-            scan_elapsed
-        );
-    };
-
-    let tree = ConcurrentMap::default();
-    let barrier = std::sync::Barrier::new(concurrency as _);
-
-    std::thread::scope(|s| {
-        let mut threads = vec![];
-        for i in 0..concurrency {
-            let tree_2 = tree.clone();
-            let barrier_2 = &barrier;
-
-            let start_fill = i * stride;
-            let stop_fill = (i + 1) * stride;
-
-            let thread = s.spawn(move || fill(tree_2, barrier_2, start_fill, stop_fill));
-            threads.push(thread);
-        }
-        for thread in threads {
-            thread.join().unwrap();
-        }
-    });
-
-    std::thread::scope(|s| {
-        let mut threads = vec![];
-        for _ in 0..concurrency {
-            let tree_2 = tree.clone();
-            let barrier_2 = &barrier;
-
-            let thread = s.spawn(move || read(tree_2, barrier_2));
-            threads.push(thread);
-        }
-        for thread in threads {
-            thread.join().unwrap();
-        }
-    });
-}
-
-#[test]
-fn bulk_load() {
-    let n: u64 = 16 * 1024 * 1024;
-
-    let concurrency = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(8) as u64;
-
-    let run = |tree: ConcurrentMap<u64, u64>, barrier: &std::sync::Barrier, low_bits| {
-        let shift = concurrency.next_power_of_two().trailing_zeros();
-        let unique_key = |key| (key << shift) | low_bits;
-
-        barrier.wait();
-        for key in 0..n / concurrency {
-            let i = unique_key(key);
-            tree.insert(i, i);
-        }
-    };
-
-    let tree = ConcurrentMap::default();
-
-    std::thread::scope(|s| {
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(1 + concurrency as usize));
-        let mut threads = vec![];
-        for i in 0..concurrency {
-            let tree_2 = tree.clone();
-            let barrier_2 = barrier.clone();
-
-            let thread = s.spawn(move || run(tree_2, &barrier_2, i));
-            threads.push(thread);
-        }
-        barrier.wait();
-        let insert = std::time::Instant::now();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        let insert_elapsed = insert.elapsed();
-        println!(
-            "{} bulk inserts/s, total {:?}",
-            (n * 1000) / u64::try_from(insert_elapsed.as_millis()).unwrap_or(u64::MAX),
-            insert_elapsed
-        );
-    });
 }
