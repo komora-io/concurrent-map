@@ -689,15 +689,12 @@ where
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_lt<Q>(&self, key: &Q) -> Option<(K, V)>
-    where
-        Q: Borrow<K> + ?Sized,
-    {
-        if key.borrow() == &K::MIN {
+    pub fn get_lt(&self, key: &K) -> Option<(K, V)> {
+        if key == &K::MIN {
             return None;
         }
 
-        self.range(..key.borrow()).next_back()
+        self.range(..key).next_back()
     }
 
     /// Atomically get a key and value out of the tree that is associated with the key that
@@ -721,11 +718,8 @@ where
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_lte<Q>(&self, key: &Q) -> Option<(K, V)>
-    where
-        Q: Borrow<K> + ?Sized,
-    {
-        self.range(..=key.borrow()).next_back()
+    pub fn get_lte(&self, key: &K) -> Option<(K, V)> {
+        self.range(..=key).next_back()
     }
 
     /// Atomically get a key and value out of the tree that is associated with the key
@@ -749,15 +743,9 @@ where
     /// let expected = None;
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_gt<Q>(&self, key: &Q) -> Option<(K, V)>
-    where
-        Q: Borrow<K> + ?Sized,
-    {
-        self.range((
-            std::ops::Bound::Excluded(key.borrow()),
-            std::ops::Bound::Unbounded,
-        ))
-        .next()
+    pub fn get_gt(&self, key: &K) -> Option<(K, V)> {
+        self.range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+            .next()
     }
 
     /// Atomically get a key and value out of the tree that is associated with the key
@@ -781,10 +769,7 @@ where
     /// let expected = None;
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_gte<Q>(&self, key: &Q) -> Option<(K, V)>
-    where
-        Q: Borrow<K> + ?Sized,
-    {
+    pub fn get_gte(&self, key: &K) -> Option<(K, V)> {
         self.range((
             std::ops::Bound::Included(key.borrow()),
             std::ops::Bound::Unbounded,
