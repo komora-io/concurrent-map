@@ -1742,7 +1742,7 @@ fn basic_tree() {
     let tree = ConcurrentMap::<usize, usize>::default();
 
     let n = 64; // SPLIT_SIZE
-    for i in 0..n {
+    for i in 0..=n {
         assert_eq!(tree.get(&i), None);
         tree.insert(i, i);
         assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
@@ -1752,23 +1752,43 @@ fn basic_tree() {
         assert_eq!(i, k);
     }
 
+    for (i, (k, _v)) in tree.range(..).rev().enumerate() {
+        assert_eq!(n - i, k);
+    }
+
     for (i, (k, _v)) in tree.iter().enumerate() {
         assert_eq!(i, k);
+    }
+
+    for (i, (k, _v)) in tree.iter().rev().enumerate() {
+        assert_eq!(n - i, k);
     }
 
     for (i, (k, _v)) in tree.range(0..).enumerate() {
         assert_eq!(i, k);
     }
 
+    for (i, (k, _v)) in tree.range(0..).rev().enumerate() {
+        assert_eq!(n - i, k);
+    }
+
     for (i, (k, _v)) in tree.range(0..n).enumerate() {
         assert_eq!(i, k);
+    }
+
+    for (i, (k, _v)) in tree.range(0..n).rev().enumerate() {
+        assert_eq!((n - 1) - i, k);
     }
 
     for (i, (k, _v)) in tree.range(0..=n).enumerate() {
         assert_eq!(i, k);
     }
 
-    for i in 0..n {
+    for (i, (k, _v)) in tree.range(0..=n).rev().enumerate() {
+        assert_eq!(n - i, k);
+    }
+
+    for i in 0..=n {
         assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
     }
 }
