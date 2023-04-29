@@ -617,7 +617,7 @@ where
     {
         let mut guard = self.ebr.pin();
 
-        let leaf = self.inner.leaf_for_key(key, &mut guard);
+        let leaf = self.inner.leaf_for_key(LeafSearch::Eq(key), &mut guard);
 
         leaf.get(key)
     }
@@ -626,7 +626,7 @@ where
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         loop {
             let mut guard = self.ebr.pin();
-            let leaf = self.inner.leaf_for_key(&key, &mut guard);
+            let leaf = self.inner.leaf_for_key(LeafSearch::Eq(&key), &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             assert!(
                 leaf_clone.len() < (FANOUT - MERGE_SIZE),
@@ -667,7 +667,7 @@ where
     {
         loop {
             let mut guard = self.ebr.pin();
-            let leaf = self.inner.leaf_for_key(key, &mut guard);
+            let leaf = self.inner.leaf_for_key(LeafSearch::Eq(key), &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.remove(key);
             let install_attempt = leaf.cas(leaf_clone, &mut guard);
@@ -734,7 +734,7 @@ where
     {
         loop {
             let mut guard = self.ebr.pin();
-            let leaf = self.inner.leaf_for_key(&key, &mut guard);
+            let leaf = self.inner.leaf_for_key(LeafSearch::Eq(&key), &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             let ret = leaf_clone.cas(key.clone(), old, new.clone());
 
@@ -789,7 +789,9 @@ where
     pub fn iter(&self) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE> {
         let mut guard = self.ebr.pin();
 
-        let current = self.inner.leaf_for_key(&K::MIN, &mut guard);
+        let current = self.inner.leaf_for_key(LeafSearch::Eq(&K::MIN), &mut guard);
+        let current_back = self.inner.leaf_for_key(LeafSearch::Max, &mut guard);
+        let next_index_from_back = 0;
 
         Iter {
             guard,
@@ -797,6 +799,8 @@ where
             current,
             range: std::ops::RangeFull,
             next_index: 0,
+            current_back,
+            next_index_from_back,
         }
     }
 
@@ -821,30 +825,38 @@ where
     ) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R> {
         let mut guard = self.ebr.pin();
 
-        #[allow(unused)]
-        let mut min = None;
+        let min = &K::MIN;
         let start = match range.start_bound() {
-            std::ops::Bound::Unbounded => {
-                min = Some(K::MIN);
-                min.as_ref().unwrap()
-            }
+            std::ops::Bound::Unbounded => min,
             std::ops::Bound::Included(k) | std::ops::Bound::Excluded(k) => k,
         };
 
-        let current = self.inner.leaf_for_key(start, &mut guard);
+        let end = match range.end_bound() {
+            std::ops::Bound::Unbounded => LeafSearch::Max,
+            std::ops::Bound::Included(k) => LeafSearch::Eq(k),
+            std::ops::Bound::Excluded(k) => LeafSearch::Lt(k),
+        };
 
+        let current = self.inner.leaf_for_key(LeafSearch::Eq(start), &mut guard);
+        let current_back = self.inner.leaf_for_key(end, &mut guard);
+
+        // TODO can we set this to 0 for simplicity?
         let next_index = current
             .leaf()
             .iter()
             .position(|(k, _v)| range.contains(k))
             .unwrap_or(0);
 
+        let next_index_from_back = 0;
+
         Iter {
             guard,
             inner: &self.inner,
-            current,
             range,
+            current,
             next_index,
+            current_back,
+            next_index_from_back,
         }
     }
 }
@@ -867,6 +879,8 @@ pub struct Iter<
     range: R,
     current: NodeView<K, V, FANOUT>,
     next_index: usize,
+    current_back: NodeView<K, V, FANOUT>,
+    next_index_from_back: usize,
 }
 
 impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> Iterator
@@ -900,8 +914,10 @@ where
                 } else if let Some(ref hi) = self.current.hi {
                     // we have to take the slow path by traversing the
                     // tree due to a concurrent merge that deleted the
-                    // right sibling
-                    self.current = self.inner.leaf_for_key(hi, &mut self.guard);
+                    // right sibling. we are protected from a use after
+                    // free of the ID itself due to holding an ebr Guard
+                    // on the Iter struct, holding a barrier against re-use.
+                    self.current = self.inner.leaf_for_key(LeafSearch::Eq(hi), &mut self.guard);
                     self.next_index = 0;
                 } else {
                     panic!("somehow hit a node that has a next but not a hi key");
@@ -912,6 +928,69 @@ where
             }
         }
     }
+}
+
+impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> DoubleEndedIterator
+    for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R>
+where
+    K: 'static + Clone + Minimum + Ord + Send + Sync + fmt::Debug,
+    V: 'static + Clone + Send + Sync,
+    R: std::ops::RangeBounds<K>,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.next_index_from_back >= self.current_back.leaf().len() {
+                if !self.range.contains(&self.current_back.lo) || self.current_back.lo == K::MIN {
+                    // finished
+                    // println!("None return 1");
+                    return None;
+                }
+
+                // println!( "fetching new current_back with serach of Lt({:?})", self.current_back.lo);
+
+                let next_current_back = self
+                    .inner
+                    .leaf_for_key(LeafSearch::Lt(&self.current_back.lo), &mut self.guard);
+                assert_ne!(next_current_back.lo, self.current_back.lo);
+                self.current_back = next_current_back;
+
+                self.next_index_from_back = 0;
+
+                if self.current_back.leaf().is_empty() {
+                    continue;
+                }
+            }
+
+            let offset_to_return = self.current_back.leaf().len() - (1 + self.next_index_from_back);
+            // println!( "offset: {} len: {} next_index_from_back: {}", offset_to_return, self.current_back.leaf().len(), self.next_index_from_back);
+            let (k, v) = self
+                .current_back
+                .leaf()
+                .get_index(offset_to_return)
+                .unwrap();
+
+            self.next_index_from_back += 1;
+            // println!("next_index_from_back is now {}", self.next_index_from_back);
+            if !self.range.contains(k) {
+                // println!("None return 2 for k {:?}", k);
+                continue;
+            } else {
+                // println!("returning Some({:?})", k);
+                return Some((k.clone(), v.clone()));
+            }
+        }
+    }
+}
+
+// TODO: enforce Lt is never constructed with K::MIN
+enum LeafSearch<K> {
+    // For finding a leaf that would contain this key, if present.
+    Eq(K),
+    // For finding the direct left sibling of a node during reverse
+    // iteration. The actual semantic is to find a leaf that has a lo key
+    // that is less than K and a hi key that is >= K
+    Lt(K),
+    Max,
 }
 
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
@@ -1146,7 +1225,7 @@ where
 
     fn leaf_for_key<'a, Q>(
         &'a self,
-        key: &Q,
+        search: LeafSearch<&Q>,
         guard: &mut Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
     ) -> NodeView<K, V, FANOUT>
     where
@@ -1213,9 +1292,26 @@ where
                 }
             }
 
-            assert!(key >= cursor.lo.borrow());
+            match search {
+                LeafSearch::Eq(k) => assert!(k >= cursor.lo.borrow()),
+                LeafSearch::Lt(_) => {
+                    // TODO unclear what specific invariants apply at this point
+                    //todo!("figure out invariant"),
+                }
+                LeafSearch::Max => {
+                    // TODO not correct because may have split after parent access
+                    //assert!(cursor.hi.is_none()),
+                }
+            }
+
             if let Some(hi) = &cursor.hi {
-                if key >= hi.borrow() {
+                let go_right = match search {
+                    LeafSearch::Eq(k) => k >= hi.borrow(),
+                    // Lt looks for a node with lo < K, hi >= K
+                    LeafSearch::Lt(k) => k > hi.borrow(),
+                    LeafSearch::Max => true,
+                };
+                if go_right {
                     // go right to the tree sibling
                     let next = cursor.next.unwrap();
                     let rhs = if let Some(view) = next.node_view(guard) {
@@ -1295,15 +1391,37 @@ where
             if cursor.is_leaf() {
                 assert!(!cursor.is_merging);
                 assert!(cursor.merging_child.is_none());
-                assert!(cursor.lo.borrow() <= key);
                 if let Some(ref hi) = cursor.hi {
-                    assert!(hi.borrow() > key);
+                    match search {
+                        LeafSearch::Eq(k) => assert!(k < hi.borrow()),
+                        LeafSearch::Lt(k) => {
+                            // TODO
+                        }
+                        LeafSearch::Max => {
+                            unreachable!("leaf should have no hi key if we're searching for Max")
+                        }
+                    }
                 }
                 break;
             }
 
             // go down the tree
-            let child_ptr = cursor.index().get_less_than_or_equal(key).unwrap().1;
+            let index = cursor.index();
+            let child_ptr = match search {
+                LeafSearch::Eq(k) => index.get_less_than_or_equal(k).unwrap().1,
+                LeafSearch::Lt(k) => {
+                    // Lt looks for a node with lo < K and hi >= K
+                    // so we find the first child with a lo key > K and
+                    // return its left sibling
+                    index.get_less_than(k).unwrap().1
+                }
+                LeafSearch::Max => {
+                    index
+                        .get_index(index.len().checked_sub(1).unwrap())
+                        .unwrap()
+                        .1
+                }
+            };
 
             parent_cursor_opt = Some(cursor);
             cursor = if let Some(view) = child_ptr.node_view(guard) {

@@ -74,15 +74,25 @@ fuzz_target!(|ops: Vec<Op>| {
                 assert_eq!(tree.remove(&key), model.remove(&key));
             }
             Op::Range { start, end } => {
-                let mut model_iter = model.range(start..end);
+                let model_iter = model.range(start..end);
                 let mut tree_iter = tree.range(start..end);
 
-                for (k1, v1) in &mut model_iter {
+                for (k1, v1) in model_iter {
                     let (k2, v2) = tree_iter.next().unwrap();
                     assert_eq!((k1, v1), (&k2, &v2));
                 }
 
                 assert_eq!(tree_iter.next(), None);
+
+                let model_iter = model.range(start..end).rev();
+                let mut tree_iter = tree.range(start..end);
+
+                for (k1, v1) in model_iter {
+                    let (k2, v2) = tree_iter.next_back().unwrap();
+                    assert_eq!((k1, v1), (&k2, &v2));
+                }
+
+                assert_eq!(tree_iter.next_back(), None);
             }
             Op::Cas { key, old, new } => {
                 let succ = if old == model.get(&key).copied() {
