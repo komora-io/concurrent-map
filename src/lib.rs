@@ -135,7 +135,7 @@ use stack_map::StackMap;
 
 use std::borrow::Borrow;
 use std::fmt;
-use std::ops::Deref;
+use std::ops::{Bound, Deref};
 use std::ptr::NonNull;
 use std::sync::{
     atomic::{AtomicPtr, AtomicUsize, Ordering},
@@ -447,13 +447,13 @@ impl Minimum for &str {
 /// # Examples
 ///
 /// ```
-/// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+/// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
 ///
 /// // insert and remove atomically returns the last value, if it was set,
 /// // similarly to a BTreeMap
-/// assert_eq!(tree.insert(1, 10), None);
-/// assert_eq!(tree.insert(1, 11), Some(10));
-/// assert_eq!(tree.remove(&1), Some(11));
+/// assert_eq!(map.insert(1, 10), None);
+/// assert_eq!(map.insert(1, 11), Some(10));
+/// assert_eq!(map.remove(&1), Some(11));
 ///
 /// // get also functions similarly to BTreeMap, except it
 /// // returns a cloned version of the value rather than a
@@ -461,13 +461,13 @@ impl Minimum for &str {
 /// // For this reason, it can be a good idea to use types that
 /// // are cheap to clone for values, which can be easily handled
 /// // with `Arc` etc...
-/// assert_eq!(tree.insert(1, 12), None);
-/// assert_eq!(tree.get(&1), Some(12));
+/// assert_eq!(map.insert(1, 12), None);
+/// assert_eq!(map.get(&1), Some(12));
 ///
 /// // compare and swap from value 12 to value 20
-/// tree.cas(1, Some(&12_usize), Some(20)).unwrap();
+/// map.cas(1, Some(&12_usize), Some(20)).unwrap();
 ///
-/// assert_eq!(tree.get(&1).unwrap(), 20);
+/// assert_eq!(map.get(&1).unwrap(), 20);
 ///
 /// // there are a lot of methods that are not covered
 /// // here - check out the docs!
@@ -638,19 +638,19 @@ where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
 {
-    /// Atomically get a value out of the tree that is associated with this key.
+    /// Atomically get a value out of the map that is associated with this key.
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
+    /// map.insert(1, 1);
     ///
-    /// let actual = tree.get(&0);
+    /// let actual = map.get(&0);
     /// let expected = None;
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get(&1);
+    /// let actual = map.get(&1);
     /// let expected = Some(1);
     /// assert_eq!(expected, actual);
     /// ```
@@ -666,128 +666,144 @@ where
         leaf.get(key)
     }
 
-    /// Atomically get a key and value out of the tree that is associated with the key that
+    /// Atomically get a key and value out of the map that is associated with the key that
     /// is lexicographically less than the provided key.
     ///
     /// This will always return `None` if the key passed to `get_lt` == `K::MIN`.
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
+    /// map.insert(1, 1);
     ///
-    /// let actual = tree.get_lt(&0);
+    /// let actual = map.get_lt(&0);
     /// let expected = None;
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_lt(&1);
+    /// let actual = map.get_lt(&1);
     /// let expected = None;
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_lt(&2);
+    /// let actual = map.get_lt(&2);
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_lt(&self, key: &K) -> Option<(K, V)> {
-        if key == &K::MIN {
+    pub fn get_lt<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Ord + PartialEq,
+    {
+        if key == K::MIN.borrow() {
             return None;
         }
 
-        self.range(..key).next_back()
+        let start = Bound::Unbounded;
+        let end = Bound::Excluded(key);
+        self.range((start, end)).next_back()
     }
 
-    /// Atomically get a key and value out of the tree that is associated with the key that
+    /// Atomically get a key and value out of the map that is associated with the key that
     /// is lexicographically less than or equal to the provided key.
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
+    /// map.insert(1, 1);
     ///
-    /// let actual = tree.get_lte(&0);
+    /// let actual = map.get_lte(&0);
     /// let expected = None;
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_lte(&1);
+    /// let actual = map.get_lte(&1);
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_lte(&2);
+    /// let actual = map.get_lte(&2);
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_lte(&self, key: &K) -> Option<(K, V)> {
-        self.range(..=key).next_back()
+    pub fn get_lte<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Ord + PartialEq,
+    {
+        let start = Bound::Unbounded;
+        let end = Bound::Included(key);
+        self.range((start, end)).next_back()
     }
 
-    /// Atomically get a key and value out of the tree that is associated with the key
+    /// Atomically get a key and value out of the map that is associated with the key
     /// that is lexicographically greater than the provided key.
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
+    /// map.insert(1, 1);
     ///
-    /// let actual = tree.get_gt(&0);
+    /// let actual = map.get_gt(&0);
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_gt(&1);
+    /// let actual = map.get_gt(&1);
     /// let expected = None;
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_gt(&2);
+    /// let actual = map.get_gt(&2);
     /// let expected = None;
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_gt(&self, key: &K) -> Option<(K, V)> {
-        self.range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
-            .next()
+    pub fn get_gt<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Ord + PartialEq,
+    {
+        self.range((Bound::Excluded(key), Bound::Unbounded)).next()
     }
 
-    /// Atomically get a key and value out of the tree that is associated with the key
+    /// Atomically get a key and value out of the map that is associated with the key
     /// that is lexicographically greater than or equal to the provided key.
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
+    /// map.insert(1, 1);
     ///
-    /// let actual = tree.get_gte(&0);
+    /// let actual = map.get_gte(&0);
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_gte(&1);
+    /// let actual = map.get_gte(&1);
     /// let expected = Some((1, 1));
     /// assert_eq!(expected, actual);
     ///
-    /// let actual = tree.get_gte(&2);
+    /// let actual = map.get_gte(&2);
     /// let expected = None;
     /// assert_eq!(expected, actual);
     /// ```
-    pub fn get_gte(&self, key: &K) -> Option<(K, V)> {
-        self.range((
-            std::ops::Bound::Included(key.borrow()),
-            std::ops::Bound::Unbounded,
-        ))
-        .next()
+    pub fn get_gte<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized + Ord + PartialEq,
+    {
+        self.range((Bound::Included(key.borrow()), Bound::Unbounded))
+            .next()
     }
 
     /// Get the minimum item stored in this structure.
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
-    /// tree.insert(2, 2);
-    /// tree.insert(3, 3);
+    /// map.insert(1, 1);
+    /// map.insert(2, 2);
+    /// map.insert(3, 3);
     ///
-    /// let actual = tree.first();
+    /// let actual = map.first();
     /// let expected = Some((1, 1));
     /// assert_eq!(actual, expected);
     /// ```
@@ -799,17 +815,17 @@ where
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
-    /// tree.insert(2, 2);
-    /// tree.insert(3, 3);
+    /// map.insert(1, 1);
+    /// map.insert(2, 2);
+    /// map.insert(3, 3);
     ///
-    /// let actual = tree.pop_first();
+    /// let actual = map.pop_first();
     /// let expected = Some((1, 1));
     /// assert_eq!(actual, expected);
     ///
-    /// assert_eq!(tree.get(&1), None);
+    /// assert_eq!(map.get(&1), None);
     /// ```
     pub fn pop_first(&self) -> Option<(K, V)>
     where
@@ -827,13 +843,13 @@ where
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
-    /// tree.insert(2, 2);
-    /// tree.insert(3, 3);
+    /// map.insert(1, 1);
+    /// map.insert(2, 2);
+    /// map.insert(3, 3);
     ///
-    /// let actual = tree.last();
+    /// let actual = map.last();
     /// let expected = Some((3, 3));
     /// assert_eq!(actual, expected);
     /// ```
@@ -845,17 +861,17 @@ where
     ///
     /// # Examples
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// tree.insert(1, 1);
-    /// tree.insert(2, 2);
-    /// tree.insert(3, 3);
+    /// map.insert(1, 1);
+    /// map.insert(2, 2);
+    /// map.insert(3, 3);
     ///
-    /// let actual = tree.pop_last();
+    /// let actual = map.pop_last();
     /// let expected = Some((3, 3));
     /// assert_eq!(actual, expected);
     ///
-    /// assert_eq!(tree.get(&3), None);
+    /// assert_eq!(map.get(&3), None);
     /// ```
     pub fn pop_last(&self) -> Option<(K, V)>
     where
@@ -869,15 +885,15 @@ where
         }
     }
 
-    /// Atomically insert a key-value pair into the tree, returning the previous value associated with this key if one existed.
+    /// Atomically insert a key-value pair into the map, returning the previous value associated with this key if one existed.
     ///
     /// # Examples
     ///
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// assert_eq!(tree.insert(1, 1), None);
-    /// assert_eq!(tree.insert(1, 1), Some(1));
+    /// assert_eq!(map.insert(1, 1), None);
+    /// assert_eq!(map.insert(1, 1), Some(1));
     /// ```
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         loop {
@@ -915,16 +931,16 @@ where
         }
     }
 
-    /// Atomically remove the value associated with this key from the tree, returning the previous value if one existed.
+    /// Atomically remove the value associated with this key from the map, returning the previous value if one existed.
     ///
     /// # Examples
     ///
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
-    /// assert_eq!(tree.remove(&1), None);
-    /// assert_eq!(tree.insert(1, 1), None);
-    /// assert_eq!(tree.remove(&1), Some(1));
+    /// assert_eq!(map.remove(&1), None);
+    /// assert_eq!(map.insert(1, 1), None);
+    /// assert_eq!(map.remove(&1), Some(1));
     /// ```
     pub fn remove<Q>(&self, key: &Q) -> Option<V>
     where
@@ -955,26 +971,26 @@ where
     /// # Examples
     ///
     /// ```
-    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
     ///
     /// // key 1 does not yet exist
-    /// assert_eq!(tree.get(&1), None);
+    /// assert_eq!(map.get(&1), None);
     ///
     /// // uniquely create value 10
-    /// tree.cas(1, None, Some(10)).unwrap();
+    /// map.cas(1, None, Some(10)).unwrap();
     ///
-    /// assert_eq!(tree.get(&1).unwrap(), 10);
+    /// assert_eq!(map.get(&1).unwrap(), 10);
     ///
     /// // compare and swap from value 10 to value 20
-    /// tree.cas(1, Some(&10_usize), Some(20)).unwrap();
+    /// map.cas(1, Some(&10_usize), Some(20)).unwrap();
     ///
-    /// assert_eq!(tree.get(&1).unwrap(), 20);
+    /// assert_eq!(map.get(&1).unwrap(), 20);
     ///
     /// // if we guess the wrong current value, a CasFailure is returned
     /// // which will tell us what the actual current value is (which we
     /// // failed to provide) and it will give us back our proposed new
     /// // value.
-    /// let cas_result = tree.cas(1, Some(&999999_usize), Some(30));
+    /// let cas_result = map.cas(1, Some(&999999_usize), Some(30));
     ///
     /// let expected_cas_failure = Err(concurrent_map::CasFailure {
     ///     actual: Some(20),
@@ -984,9 +1000,9 @@ where
     /// assert_eq!(cas_result, expected_cas_failure);
     ///
     /// // conditionally delete
-    /// tree.cas(1, Some(&20_usize), None).unwrap();
+    /// map.cas(1, Some(&20_usize), None).unwrap();
     ///
-    /// assert_eq!(tree.get(&1), None);
+    /// assert_eq!(map.get(&1), None);
     /// ```
     pub fn cas<VRef>(
         &self,
@@ -1043,15 +1059,15 @@ where
         self.len() == 0
     }
 
-    /// Iterate over the tree.
+    /// Iterate over the map.
     ///
     /// This is not an atomic snapshot, and it caches B+tree leaf
     /// nodes as it iterates through them to achieve high throughput.
     /// As a result, the following behaviors are possible:
     ///
-    /// * may (or may not!) return values that were concurrently added to the tree after the
+    /// * may (or may not!) return values that were concurrently added to the map after the
     ///   iterator was created
-    /// * may (or may not!) return items that were concurrently deleted from the tree after
+    /// * may (or may not!) return items that were concurrently deleted from the map after
     ///   the iterator was created
     /// * If a key's value is changed from one value to another one after this iterator
     ///   is created, this iterator might return the old or the new value.
@@ -1073,18 +1089,19 @@ where
             next_index: 0,
             current_back,
             next_index_from_back,
+            q: std::marker::PhantomData,
         }
     }
 
-    /// Iterate over a range of the tree.
+    /// Iterate over a range of the map.
     ///
     /// This is not an atomic snapshot, and it caches B+tree leaf
     /// nodes as it iterates through them to achieve high throughput.
     /// As a result, the following behaviors are possible:
     ///
-    /// * may (or may not!) return values that were concurrently added to the tree after the
+    /// * may (or may not!) return values that were concurrently added to the map after the
     ///   iterator was created
-    /// * may (or may not!) return items that were concurrently deleted from the tree after
+    /// * may (or may not!) return items that were concurrently deleted from the map after
     ///   the iterator was created
     /// * If a key's value is changed from one value to another one after this iterator
     ///   is created, this iterator might return the old or the new value.
@@ -1095,23 +1112,26 @@ where
     /// # Panics
     ///
     /// This will panic if the provided range's end_bound() == Bound::Excluded(K::MIN).
-    pub fn range<R: std::ops::RangeBounds<K>>(
-        &self,
-        range: R,
-    ) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R> {
+    pub fn range<Q, R>(&self, range: R) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R, Q>
+    where
+        R: std::ops::RangeBounds<Q>,
+        K: Borrow<Q>,
+        Q: ?Sized + Ord + PartialEq,
+    {
         let mut guard = self.ebr.pin();
 
-        let min = &K::MIN;
+        let kmin = &K::MIN;
+        let min = kmin.borrow();
         let start = match range.start_bound() {
-            std::ops::Bound::Unbounded => min,
-            std::ops::Bound::Included(k) | std::ops::Bound::Excluded(k) => k,
+            Bound::Unbounded => min,
+            Bound::Included(k) | Bound::Excluded(k) => k,
         };
 
         let end = match range.end_bound() {
-            std::ops::Bound::Unbounded => LeafSearch::Max,
-            std::ops::Bound::Included(k) => LeafSearch::Eq(k),
-            std::ops::Bound::Excluded(k) => {
-                assert!(k != &K::MIN);
+            Bound::Unbounded => LeafSearch::Max,
+            Bound::Included(k) => LeafSearch::Eq(k),
+            Bound::Excluded(k) => {
+                assert!(k != K::MIN.borrow());
                 LeafSearch::Lt(k)
             }
         };
@@ -1127,6 +1147,7 @@ where
             current_back,
             next_index: 0,
             next_index_from_back: 0,
+            q: std::marker::PhantomData,
         }
     }
 }
@@ -1139,6 +1160,25 @@ where
 /// Note that this iterator contains an epoch-based reclamation
 /// guard, and the overall concurrent structure will be unable
 /// to free any memory until this iterator drops again.
+///
+/// There are a lot of generics on this struct. Most of them directly
+/// correspond to the generics of the [`ConcurrentMap`] itself. But
+/// there are two that don't:
+///
+/// * `R` is The type of the range that is stored in the iterator
+/// * `Q` is the type that exists INSIDE of `R`
+///
+/// So, if an `Iter` is created from:
+///
+/// ```
+/// let map = concurrent_map::ConcurrentMap::default::<usize, usize>();
+/// let start = std::ops::Bound::Excluded(0_usize);
+/// let end = std::ops::Bound::Included(5_usize);
+/// let iter = map.range((start, end));
+/// ```
+///
+/// then the type of `R` is `(std::ops::Bound, std::ops::Bound)`
+/// (a 2-tuple of `std::ops::Bound`), and the type of `Q` is `usize`.
 pub struct Iter<
     'a,
     K,
@@ -1146,10 +1186,13 @@ pub struct Iter<
     const FANOUT: usize,
     const LOCAL_GC_BUFFER_SIZE: usize,
     R = std::ops::RangeFull,
+    Q = K,
 > where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
-    R: std::ops::RangeBounds<K>,
+    R: std::ops::RangeBounds<Q>,
+    K: Borrow<Q>,
+    Q: ?Sized,
 {
     inner: &'a Inner<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>,
     guard: Guard<'a, Deferred<K, V, FANOUT>, LOCAL_GC_BUFFER_SIZE>,
@@ -1158,14 +1201,17 @@ pub struct Iter<
     next_index: usize,
     current_back: NodeView<K, V, FANOUT>,
     next_index_from_back: usize,
+    q: std::marker::PhantomData<&'a Q>,
 }
 
-impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> Iterator
-    for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R>
+impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R, Q> Iterator
+    for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R, Q>
 where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
-    R: std::ops::RangeBounds<K>,
+    R: std::ops::RangeBounds<Q>,
+    K: Borrow<Q>,
+    Q: ?Sized + PartialEq + Ord,
 {
     type Item = (K, V);
 
@@ -1174,13 +1220,16 @@ where
             if let Some((k, v)) = self.current.leaf().get_index(self.next_index) {
                 // iterate over current cached b+ tree leaf node
                 self.next_index += 1;
-                if !self.range.contains(k) {
+                if !self.range.contains(k.borrow()) {
                     // we might hit this on the first iteration
                     continue;
                 }
                 return Some((k.clone(), v.clone()));
             } else if let Some(next_ptr) = self.current.next {
-                if !self.range.contains(self.current.hi.as_ref().unwrap()) {
+                if !self
+                    .range
+                    .contains(self.current.hi.as_ref().unwrap().borrow())
+                {
                     // we have reached the end of our range
                     return None;
                 }
@@ -1190,11 +1239,13 @@ where
                     self.next_index = 0;
                 } else if let Some(ref hi) = self.current.hi {
                     // we have to take the slow path by traversing the
-                    // tree due to a concurrent merge that deleted the
+                    // map due to a concurrent merge that deleted the
                     // right sibling. we are protected from a use after
                     // free of the ID itself due to holding an ebr Guard
                     // on the Iter struct, holding a barrier against re-use.
-                    self.current = self.inner.leaf_for_key(LeafSearch::Eq(hi), &mut self.guard);
+                    self.current = self
+                        .inner
+                        .leaf_for_key(LeafSearch::Eq(hi.borrow()), &mut self.guard);
                     self.next_index = 0;
                 } else {
                     panic!("somehow hit a node that has a next but not a hi key");
@@ -1207,24 +1258,29 @@ where
     }
 }
 
-impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R> DoubleEndedIterator
-    for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R>
+impl<'a, K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize, R, Q> DoubleEndedIterator
+    for Iter<'a, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R, Q>
 where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
-    R: std::ops::RangeBounds<K>,
+    R: std::ops::RangeBounds<Q>,
+    K: Borrow<Q>,
+    Q: ?Sized + PartialEq + Ord,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         loop {
             if self.next_index_from_back >= self.current_back.leaf().len() {
-                if !self.range.contains(&self.current_back.lo) || self.current_back.lo == K::MIN {
+                if !self.range.contains(&self.current_back.lo.borrow())
+                    || self.current_back.lo == K::MIN
+                {
                     // finished
                     return None;
                 }
 
-                let next_current_back = self
-                    .inner
-                    .leaf_for_key(LeafSearch::Lt(&self.current_back.lo), &mut self.guard);
+                let next_current_back = self.inner.leaf_for_key(
+                    LeafSearch::Lt(&self.current_back.lo.borrow()),
+                    &mut self.guard,
+                );
                 assert!(next_current_back.lo != self.current_back.lo);
                 self.current_back = next_current_back;
 
@@ -1243,7 +1299,7 @@ where
                 .unwrap();
 
             self.next_index_from_back += 1;
-            if !self.range.contains(k) {
+            if !self.range.contains(k.borrow()) {
                 continue;
             } else {
                 return Some((k.clone(), v.clone()));
@@ -1998,72 +2054,72 @@ const fn _test_impls() {
 }
 
 #[test]
-fn basic_tree() {
-    let tree = ConcurrentMap::<usize, usize>::default();
+fn basic_map() {
+    let map = ConcurrentMap::<usize, usize>::default();
 
     let n = 64; // SPLIT_SIZE
     for i in 0..=n {
-        assert_eq!(tree.get(&i), None);
-        tree.insert(i, i);
-        assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
+        assert_eq!(map.get(&i), None);
+        map.insert(i, i);
+        assert_eq!(map.get(&i), Some(i), "failed to get key {i}");
     }
 
-    for (i, (k, _v)) in tree.range(..).enumerate() {
+    for (i, (k, _v)) in map.range(..).enumerate() {
         assert_eq!(i, k);
     }
 
-    for (i, (k, _v)) in tree.range(..).rev().enumerate() {
+    for (i, (k, _v)) in map.range(..).rev().enumerate() {
         assert_eq!(n - i, k);
     }
 
-    for (i, (k, _v)) in tree.iter().enumerate() {
+    for (i, (k, _v)) in map.iter().enumerate() {
         assert_eq!(i, k);
     }
 
-    for (i, (k, _v)) in tree.iter().rev().enumerate() {
+    for (i, (k, _v)) in map.iter().rev().enumerate() {
         assert_eq!(n - i, k);
     }
 
-    for (i, (k, _v)) in tree.range(0..).enumerate() {
+    for (i, (k, _v)) in map.range(0..).enumerate() {
         assert_eq!(i, k);
     }
 
-    for (i, (k, _v)) in tree.range(0..).rev().enumerate() {
+    for (i, (k, _v)) in map.range(0..).rev().enumerate() {
         assert_eq!(n - i, k);
     }
 
-    for (i, (k, _v)) in tree.range(0..n).enumerate() {
+    for (i, (k, _v)) in map.range(0..n).enumerate() {
         assert_eq!(i, k);
     }
 
-    for (i, (k, _v)) in tree.range(0..n).rev().enumerate() {
+    for (i, (k, _v)) in map.range(0..n).rev().enumerate() {
         assert_eq!((n - 1) - i, k);
     }
 
-    for (i, (k, _v)) in tree.range(0..=n).enumerate() {
+    for (i, (k, _v)) in map.range(0..=n).enumerate() {
         assert_eq!(i, k);
     }
 
-    for (i, (k, _v)) in tree.range(0..=n).rev().enumerate() {
+    for (i, (k, _v)) in map.range(0..=n).rev().enumerate() {
         assert_eq!(n - i, k);
     }
 
     for i in 0..=n {
-        assert_eq!(tree.get(&i), Some(i), "failed to get key {i}");
+        assert_eq!(map.get(&i), Some(i), "failed to get key {i}");
     }
 }
 
 #[test]
-fn timing_tree() {
+fn timing_map() {
     use std::time::Instant;
 
-    let tree = ConcurrentMap::<u64, u64>::default();
+    let map = ConcurrentMap::<u64, u64>::default();
 
     let n = 1024 * 1024;
 
     let insert = Instant::now();
     for i in 0..n {
-        tree.insert(i, i);
+        map.insert(i, i);
     }
     let insert_elapsed = insert.elapsed();
     println!(
@@ -2073,7 +2129,7 @@ fn timing_tree() {
     );
 
     let scan = Instant::now();
-    let count = tree.range(..).count();
+    let count = map.range(..).count();
     assert_eq!(count as u64, n);
     let scan_elapsed = scan.elapsed();
     println!(
@@ -2083,7 +2139,7 @@ fn timing_tree() {
     );
 
     let scan_rev = Instant::now();
-    let count = tree.range(..).rev().count();
+    let count = map.range(..).rev().count();
     assert_eq!(count as u64, n);
     let scan_rev_elapsed = scan_rev.elapsed();
     println!(
@@ -2094,7 +2150,7 @@ fn timing_tree() {
 
     let gets = Instant::now();
     for i in 0..n {
-        tree.get(&i);
+        map.get(&i);
     }
     let gets_elapsed = gets.elapsed();
     println!(
