@@ -810,6 +810,34 @@ where
         self.iter().next()
     }
 
+    /// Atomically remove the minimum item stored in this structure.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    /// tree.insert(2, 2);
+    /// tree.insert(3, 3);
+    ///
+    /// let actual = tree.pop_first();
+    /// let expected = Some((1, 1));
+    /// assert_eq!(actual, expected);
+    ///
+    /// assert_eq!(tree.get(&1), None);
+    /// ```
+    pub fn pop_first(&self) -> Option<(K, V)>
+    where
+        V: PartialEq,
+    {
+        loop {
+            let (k, v) = self.first()?;
+            if self.cas(k.clone(), Some(&v), None).is_ok() {
+                return Some((k, v));
+            }
+        }
+    }
+
     /// Get the maximum item stored in this structure.
     ///
     /// # Examples
@@ -826,6 +854,34 @@ where
     /// ```
     pub fn last(&self) -> Option<(K, V)> {
         self.iter().next_back()
+    }
+
+    /// Atomically remove the maximum item stored in this structure.
+    ///
+    /// # Examples
+    /// ```
+    /// let tree = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// tree.insert(1, 1);
+    /// tree.insert(2, 2);
+    /// tree.insert(3, 3);
+    ///
+    /// let actual = tree.pop_last();
+    /// let expected = Some((3, 3));
+    /// assert_eq!(actual, expected);
+    ///
+    /// assert_eq!(tree.get(&3), None);
+    /// ```
+    pub fn pop_last(&self) -> Option<(K, V)>
+    where
+        V: PartialEq,
+    {
+        loop {
+            let (k, v) = self.last()?;
+            if self.cas(k.clone(), Some(&v), None).is_ok() {
+                return Some((k, v));
+            }
+        }
     }
 
     /// Atomically insert a key-value pair into the tree, returning the previous value associated with this key if one existed.
