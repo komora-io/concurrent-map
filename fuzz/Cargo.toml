@@ -14,10 +14,11 @@ features = ["arbitrary-derive"]
 
 [dependencies]
 arbitrary = { version = "1.0.3", features = ["derive"] }
+bincode = "1.3.3"
 
 [dependencies.concurrent-map]
 path = ".."
-features = ["fuzz_constants"]
+features = ["fuzz_constants", "serde"]
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -26,5 +27,17 @@ members = ["."]
 [[bin]]
 name = "fuzz_model"
 path = "fuzz_targets/fuzz_model.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_serde"
+path = "fuzz_targets/fuzz_serde.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_iter"
+path = "fuzz_targets/fuzz_iter.rs"
 test = false
 doc = false

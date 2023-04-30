@@ -100,6 +100,9 @@
 //! performance, you may find a better option among one of the many concurrent
 //! hashmap implementations that are floating around.
 
+#[cfg(feature = "serde")]
+mod serde;
+
 #[cfg(not(feature = "fault_injection"))]
 #[inline]
 const fn debug_delay() -> bool {
@@ -488,6 +491,32 @@ where
     // an eventually consistent, lagging count of the
     // number of items in this structure.
     len: Arc<AtomicUsize>,
+}
+
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> PartialEq
+    for ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
+where
+    K: 'static + fmt::Debug + Clone + Minimum + Ord + Send + Sync + PartialEq,
+    V: 'static + fmt::Debug + Clone + Send + Sync + PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        let literally_the_same = Arc::as_ptr(&self.inner) == Arc::as_ptr(&other.inner);
+        if literally_the_same {
+            return true;
+        }
+
+        let self_iter = self.iter();
+        let mut other_iter = other.iter();
+
+        for self_kv in self_iter {
+            let other_kv = other_iter.next();
+            if !Some(self_kv).eq(&other_kv) {
+                return false;
+            }
+        }
+
+        other_iter.next().is_none()
+    }
 }
 
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize> fmt::Debug
@@ -900,11 +929,7 @@ where
             let mut guard = self.ebr.pin();
             let leaf = self.inner.leaf_for_key(LeafSearch::Eq(&key), &mut guard);
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
-            assert!(
-                leaf_clone.len() < (FANOUT - MERGE_SIZE),
-                "bad leaf: should split: {}",
-                leaf_clone.should_split(),
-            );
+            assert!(!leaf_clone.should_split(), "bad leaf: should split",);
             let ret = leaf_clone.insert(key.clone(), value.clone());
 
             let rhs_ptr_opt = if leaf_clone.should_split() {
@@ -1233,20 +1258,36 @@ where
                     // we have reached the end of our range
                     return None;
                 }
-                if let Some(next_view) = next_ptr.node_view(&mut self.guard) {
+                if let Some(next_current) = next_ptr.node_view(&mut self.guard) {
                     // we were able to take the fast path by following the sibling pointer
-                    self.current = next_view;
-                    self.next_index = 0;
+
+                    // it's possible that nodes were merged etc... so we need to make sure
+                    // that we make forward progress
+                    self.next_index = next_current
+                        .leaf()
+                        .iter()
+                        .position(|(k, _v)| k >= self.current.hi.as_ref().unwrap())
+                        .unwrap_or(0);
+
+                    self.current = next_current;
                 } else if let Some(ref hi) = self.current.hi {
                     // we have to take the slow path by traversing the
                     // map due to a concurrent merge that deleted the
                     // right sibling. we are protected from a use after
                     // free of the ID itself due to holding an ebr Guard
                     // on the Iter struct, holding a barrier against re-use.
-                    self.current = self
+                    let next_current = self
                         .inner
                         .leaf_for_key(LeafSearch::Eq(hi.borrow()), &mut self.guard);
-                    self.next_index = 0;
+
+                    // it's possible that nodes were merged etc... so we need to make sure
+                    // that we make forward progress
+                    self.next_index = next_current
+                        .leaf()
+                        .iter()
+                        .position(|(k, _v)| k >= hi)
+                        .unwrap_or(0);
+                    self.current = next_current;
                 } else {
                     panic!("somehow hit a node that has a next but not a hi key");
                 }
@@ -1282,9 +1323,15 @@ where
                     &mut self.guard,
                 );
                 assert!(next_current_back.lo != self.current_back.lo);
-                self.current_back = next_current_back;
 
-                self.next_index_from_back = 0;
+                self.next_index_from_back = next_current_back
+                    .leaf()
+                    .iter()
+                    .rev()
+                    .position(|(k, _v)| k < &self.current_back.lo)
+                    .unwrap_or(0);
+
+                self.current_back = next_current_back;
 
                 if self.current_back.leaf().is_empty() {
                     continue;
@@ -1947,7 +1994,7 @@ where
         if self.merging_child.is_some() || self.is_merging {
             return false;
         }
-        self.len() >= FANOUT - MERGE_SIZE
+        self.len() > FANOUT - MERGE_SIZE
     }
 
     const fn len(&self) -> usize {
@@ -1962,8 +2009,8 @@ where
             // the infinity node should split almost at the end to improve fill ratio
             self.len() - 2
         } else if self.lo == K::MIN {
-            // the right-most node should split almost at the beginning to improve fill ratio
-            1
+            // the left-most node should split almost at the beginning to improve fill ratio
+            2
         } else {
             FANOUT / 2
         };
@@ -1971,15 +2018,18 @@ where
         let (split_point, rhs_data) = match self.data {
             Data::Leaf(ref mut leaf) => {
                 let (split_point, rhs_leaf) = leaf.split_off(split_idx);
+                assert!(leaf.len() > MERGE_SIZE);
                 (split_point, Data::Leaf(rhs_leaf))
             }
             Data::Index(ref mut index) => {
                 let (split_point, rhs_index) = index.split_off(split_idx);
+                assert!(index.len() > MERGE_SIZE);
                 (split_point, Data::Index(rhs_index))
             }
         };
 
         assert!(rhs_data.len() < FANOUT - MERGE_SIZE);
+        assert!(rhs_data.len() > MERGE_SIZE);
 
         let rhs_hi = std::mem::replace(&mut self.hi, Some(split_point.clone()));
 
