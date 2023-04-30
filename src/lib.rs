@@ -1311,7 +1311,7 @@ where
     fn next_back(&mut self) -> Option<Self::Item> {
         loop {
             if self.next_index_from_back >= self.current_back.leaf().len() {
-                if !self.range.contains(&self.current_back.lo.borrow())
+                if !self.range.contains(self.current_back.lo.borrow())
                     || self.current_back.lo == K::MIN
                 {
                     // finished
@@ -1319,7 +1319,7 @@ where
                 }
 
                 let next_current_back = self.inner.leaf_for_key(
-                    LeafSearch::Lt(&self.current_back.lo.borrow()),
+                    LeafSearch::Lt(self.current_back.lo.borrow()),
                     &mut self.guard,
                 );
                 assert!(next_current_back.lo != self.current_back.lo);
