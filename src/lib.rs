@@ -2017,12 +2017,14 @@ where
 
         let (split_point, rhs_data) = match self.data {
             Data::Leaf(ref mut leaf) => {
-                let (split_point, rhs_leaf) = leaf.split_off(split_idx);
+                let rhs_leaf = leaf.split_off(split_idx);
+                let split_point = rhs_leaf.first().unwrap().0.clone();
                 assert!(leaf.len() > MERGE_SIZE);
                 (split_point, Data::Leaf(rhs_leaf))
             }
             Data::Index(ref mut index) => {
-                let (split_point, rhs_index) = index.split_off(split_idx);
+                let rhs_index = index.split_off(split_idx);
+                let split_point = rhs_index.first().unwrap().0.clone();
                 assert!(index.len() > MERGE_SIZE);
                 (split_point, Data::Index(rhs_index))
             }
