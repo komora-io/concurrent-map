@@ -123,12 +123,9 @@ fn debug_delay() -> bool {
     let mut rng = thread_rng();
 
     match rng.gen_range(0..100) {
-        0..=98 => {
-            //thread::yield_now();
-            false
-        }
+        0..=98 => false,
         _ => {
-            //thread::sleep(Duration::from_millis(1));
+            thread::yield_now();
             true
         }
     }
@@ -332,6 +329,21 @@ where
                 }
             }
         }
+    }
+
+    /// This function is used to get a mutable reference to
+    /// the node. It is intended as an optimization to avoid
+    /// RCU overhead when the overall ConcurrentMap's inner
+    /// Arc only has a single copy, giving us enough runtime
+    /// information to uphold the required invariant that there
+    /// is at most one accessing thread for the overall structure.
+    ///
+    /// Additional care must be taken to ensure that at any time,
+    /// there is only ever a single mutable reference to this
+    /// inner Node, otherwise various optimizations may cause
+    /// memory corruption. When in doubt, don't use this.
+    unsafe fn get_mut(&mut self) -> &mut Node<K, V, FANOUT> {
+        self.ptr.as_mut()
     }
 }
 
@@ -916,6 +928,10 @@ where
 
     /// Atomically insert a key-value pair into the map, returning the previous value associated with this key if one existed.
     ///
+    /// This method has an optimization that skips lock-free RCU when the internal `Arc` has a
+    /// strong count of `1`, significantly increasing insertion throughput when used from a
+    /// single thread.
+    ///
     /// # Examples
     ///
     /// ```
@@ -925,11 +941,41 @@ where
     /// assert_eq!(map.insert(1, 1), Some(1));
     /// ```
     pub fn insert(&self, key: K, value: V) -> Option<V> {
+        let strong_count = Arc::strong_count(&self.inner);
+        let direct_mutations_safe = strong_count == 1;
+
+        // This optimization allows us to completely skip RCU.
+        // We use the debug_delay here to exercise both paths
+        // even when testing with a single thread.
+        if direct_mutations_safe && !debug_delay() {
+            let mut guard = self.ebr.pin();
+            let mut leaf = self.inner.leaf_for_key(LeafSearch::Eq(&key), &mut guard);
+            let node_mut_ref: &mut Node<K, V, FANOUT> = unsafe { leaf.get_mut() };
+            assert!(!node_mut_ref.should_split(), "bad leaf: should split",);
+
+            let ret = node_mut_ref.insert(key, value);
+
+            if node_mut_ref.should_split() {
+                // don't need to track this for potential cleanup due to the fact that it's
+                // guaranteed to succeed.
+                node_mut_ref.split();
+            }
+
+            if ret.is_none() {
+                self.len.fetch_add(1, Ordering::Relaxed);
+            }
+
+            return ret;
+        }
+
+        // Concurrent workloads need to do the normal RCU loop.
         loop {
             let mut guard = self.ebr.pin();
             let leaf = self.inner.leaf_for_key(LeafSearch::Eq(&key), &mut guard);
+
             let mut leaf_clone: Box<Node<K, V, FANOUT>> = Box::new((*leaf).clone());
             assert!(!leaf_clone.should_split(), "bad leaf: should split",);
+
             let ret = leaf_clone.insert(key.clone(), value.clone());
 
             let rhs_ptr_opt = if leaf_clone.should_split() {
@@ -1196,7 +1242,7 @@ where
 /// So, if an `Iter` is created from:
 ///
 /// ```
-/// let map = concurrent_map::ConcurrentMap::default::<usize, usize>();
+/// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
 /// let start = std::ops::Bound::Excluded(0_usize);
 /// let end = std::ops::Bound::Included(5_usize);
 /// let iter = map.range((start, end));
