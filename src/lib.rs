@@ -1036,8 +1036,9 @@ where
     /// Atomically compare and swap the value associated with this key from the old value to the
     /// new one. An old value of `None` means "only create this value if it does not already
     /// exist". A new value of `None` means "delete this value, if it matches the provided old value".
-    /// If successful, returns the old value if it existed. If unsuccessful, returns the proposed
-    /// new value.
+    /// If successful, returns the old value if it existed. If unsuccessful, returns both the proposed
+    /// new value that failed to be installed as well as the current actual value in a [`CasFailure`]
+    /// struct.
     ///
     /// # Examples
     ///
@@ -1219,6 +1220,108 @@ where
             next_index: 0,
             next_index_from_back: 0,
             q: std::marker::PhantomData,
+        }
+    }
+
+    /// Fetch the value, apply a function to it and return the result.
+    /// Similar to [`ConcurrentMap::cas`], returning a `None` from the provided
+    /// closure will cause a deletion of the value.
+    ///
+    /// # Note
+    ///
+    /// This may call the function multiple times if the value has been
+    /// changed from other threads in the meantime.
+    /// This function essentially implements the common CAS loop pattern
+    /// for atomically pushing a function to some shared data.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = concurrent_map::ConcurrentMap::<&'static str, usize>::default();
+    ///
+    /// fn increment(old_opt: Option<&usize>) -> Option<usize> {
+    ///     let incremented = match old_opt {
+    ///         Some(old) => {
+    ///             old + 1
+    ///         }
+    ///         None => 0,
+    ///     };
+    ///
+    ///     // returning `None` here means "delete this value"
+    ///     Some(incremented)
+    /// }
+    ///
+    /// assert_eq!(map.update_and_fetch("counter", increment), Some(0));
+    /// assert_eq!(map.update_and_fetch("counter", increment), Some(1));
+    /// assert_eq!(map.update_and_fetch("counter", increment), Some(2));
+    /// assert_eq!(map.update_and_fetch("counter", increment), Some(3));
+    /// ```
+    pub fn update_and_fetch<F>(&self, key: K, mut f: F) -> Option<V>
+    where
+        F: FnMut(Option<&V>) -> Option<V>,
+        V: PartialEq,
+    {
+        let mut current_opt = self.get(&key);
+
+        loop {
+            let next = f(current_opt.as_ref());
+            match self.cas(key.clone(), current_opt.as_ref(), next.clone()) {
+                Ok(_) => return next,
+                Err(CasFailure { actual: cur, .. }) => {
+                    current_opt = cur;
+                }
+            }
+        }
+    }
+
+    /// Fetch the value, apply a function to it and return the previous value.
+    /// Similar to [`ConcurrentMap::cas`], returning a `None` from the provided
+    /// closure will cause a deletion of the value.
+    ///
+    /// # Note
+    ///
+    /// This may call the function multiple times if the value has been
+    /// changed from other threads in the meantime.
+    /// This function essentially implements the common CAS loop pattern
+    /// for atomically pushing a function to some shared data.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = concurrent_map::ConcurrentMap::<&'static str, usize>::default();
+    ///
+    /// fn increment(old_opt: Option<&usize>) -> Option<usize> {
+    ///     let incremented = match old_opt {
+    ///         Some(old) => {
+    ///             old + 1
+    ///         }
+    ///         None => 0,
+    ///     };
+    ///
+    ///     // returning `None` here means "delete this value"
+    ///     Some(incremented)
+    /// }
+    ///
+    /// assert_eq!(map.fetch_and_update("counter", increment), None);
+    /// assert_eq!(map.fetch_and_update("counter", increment), Some(0));
+    /// assert_eq!(map.fetch_and_update("counter", increment), Some(1));
+    /// assert_eq!(map.fetch_and_update("counter", increment), Some(2));
+    /// ```
+    pub fn fetch_and_update<F>(&self, key: K, mut f: F) -> Option<V>
+    where
+        F: FnMut(Option<&V>) -> Option<V>,
+        V: PartialEq,
+    {
+        let mut current_opt = self.get(&key);
+
+        loop {
+            let next = f(current_opt.as_ref());
+            match self.cas(key.clone(), current_opt.as_ref(), next) {
+                Ok(_) => return current_opt,
+                Err(CasFailure { actual: cur, .. }) => {
+                    current_opt = cur;
+                }
+            }
         }
     }
 }
