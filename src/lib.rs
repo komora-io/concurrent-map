@@ -1255,6 +1255,9 @@ where
     /// assert_eq!(map.update_and_fetch("counter", increment), Some(1));
     /// assert_eq!(map.update_and_fetch("counter", increment), Some(2));
     /// assert_eq!(map.update_and_fetch("counter", increment), Some(3));
+    ///
+    /// // push a "deletion" that returns None
+    /// assert_eq!(map.update_and_fetch("counter", |_| None), None);
     /// ```
     pub fn update_and_fetch<F>(&self, key: K, mut f: F) -> Option<V>
     where
@@ -1306,6 +1309,13 @@ where
     /// assert_eq!(map.fetch_and_update("counter", increment), Some(0));
     /// assert_eq!(map.fetch_and_update("counter", increment), Some(1));
     /// assert_eq!(map.fetch_and_update("counter", increment), Some(2));
+    ///
+    /// // push a "deletion" that returns the previous value, essentially
+    /// // mimicking the ConcurrentMap::remove method.
+    /// assert_eq!(map.fetch_and_update("counter", |_| None), Some(3));
+    ///
+    /// // verify that it's not present
+    /// assert_eq!(map.get("counter"), None);
     /// ```
     pub fn fetch_and_update<F>(&self, key: K, mut f: F) -> Option<V>
     where
