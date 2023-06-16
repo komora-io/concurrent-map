@@ -880,6 +880,54 @@ where
         }
     }
 
+    /// Pops the first kv pair in the provided range, or returns `None` if nothing
+    /// exists within that range.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the provided range's end_bound() == Bound::Excluded(K::MIN).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use concurrent_map::ConcurrentMap;
+    ///
+    /// let data = vec![
+    ///     ("key 1", 1),
+    ///     ("key 2", 2),
+    ///     ("key 3", 3)
+    /// ];
+    ///
+    /// let map: ConcurrentMap<&'static str, usize> = data.iter().copied().collect();
+    ///
+    /// let r1 = map.pop_first_in_range("key 1"..="key 3");
+    /// assert_eq!(Some(("key 1", 1_usize)), r1);
+    ///
+    /// let r2 = map.pop_first_in_range("key 1".."key 3");
+    /// assert_eq!(Some(("key 2", 2_usize)), r2);
+    ///
+    /// let r3: Vec<_> = map.range("key 4"..).collect();
+    /// assert!(r3.is_empty());
+    ///
+    /// let r4 = map.pop_first_in_range("key 2"..="key 3");
+    /// assert_eq!(Some(("key 3", 3_usize)), r4);
+    /// ```
+    pub fn pop_first_in_range<Q, R>(&self, range: R) -> Option<(K, V)>
+    where
+        R: std::ops::RangeBounds<Q> + Clone,
+        K: Borrow<Q>,
+        V: PartialEq,
+        Q: ?Sized + Ord + PartialEq,
+    {
+        loop {
+            let mut r = self.range(range.clone());
+            let (k, v) = r.next()?;
+            if self.cas(k.clone(), Some(&v), None).is_ok() {
+                return Some((k, v));
+            }
+        }
+    }
+
     /// Get the maximum item stored in this structure.
     ///
     /// # Examples
@@ -920,6 +968,60 @@ where
     {
         loop {
             let (k, v) = self.last()?;
+            if self.cas(k.clone(), Some(&v), None).is_ok() {
+                return Some((k, v));
+            }
+        }
+    }
+
+    /// Pops the last kv pair in the provided range, or returns `None` if nothing
+    /// exists within that range.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the provided range's end_bound() == Bound::Excluded(K::MIN).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use concurrent_map::ConcurrentMap;
+    ///
+    /// let data = vec![
+    ///     ("key 1", 1),
+    ///     ("key 2", 2),
+    ///     ("key 3", 3)
+    /// ];
+    ///
+    /// let map: ConcurrentMap<&'static str, usize> = data.iter().copied().collect();
+    ///
+    /// let r1 = map.pop_last_in_range("key 1"..="key 3");
+    /// assert_eq!(Some(("key 3", 3_usize)), r1);
+    ///
+    /// let r2 = map.pop_last_in_range("key 1".."key 3");
+    /// assert_eq!(Some(("key 2", 2_usize)), r2);
+    ///
+    /// let r3 = map.pop_last_in_range("key 4"..);
+    /// assert!(r3.is_none());
+    ///
+    /// let r4 = map.pop_last_in_range("key 2"..="key 3");
+    /// assert!(r4.is_none());
+    ///
+    /// let r5 = map.pop_last_in_range("key 0"..="key 3");
+    /// assert_eq!(Some(("key 1", 1_usize)), r5);
+    ///
+    /// let r6 = map.pop_last_in_range("key 0"..="key 3");
+    /// assert!(r6.is_none());
+    /// ```
+    pub fn pop_last_in_range<Q, R>(&self, range: R) -> Option<(K, V)>
+    where
+        R: std::ops::RangeBounds<Q> + Clone,
+        K: Borrow<Q>,
+        V: PartialEq,
+        Q: ?Sized + Ord + PartialEq,
+    {
+        loop {
+            let mut r = self.range(range.clone());
+            let (k, v) = r.next_back()?;
             if self.cas(k.clone(), Some(&v), None).is_ok() {
                 return Some((k, v));
             }
@@ -1146,6 +1248,24 @@ where
     ///
     /// But, you can be certain that any key that existed prior to the creation of this
     /// iterator, and was not changed during iteration, will be observed as expected.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use concurrent_map::ConcurrentMap;
+    ///
+    /// let data = vec![
+    ///     ("key 1", 1),
+    ///     ("key 2", 2),
+    ///     ("key 3", 3)
+    /// ];
+    ///
+    /// let map: ConcurrentMap<&'static str, usize> = data.iter().copied().collect();
+    ///
+    /// let r: Vec<_> = map.iter().collect();
+    ///
+    /// assert_eq!(&data, &r);
+    /// ```
     pub fn iter(&self) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE> {
         let mut guard = self.ebr.pin();
 
@@ -1184,6 +1304,32 @@ where
     /// # Panics
     ///
     /// This will panic if the provided range's end_bound() == Bound::Excluded(K::MIN).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use concurrent_map::ConcurrentMap;
+    ///
+    /// let data = vec![
+    ///     ("key 1", 1),
+    ///     ("key 2", 2),
+    ///     ("key 3", 3)
+    /// ];
+    ///
+    /// let map: ConcurrentMap<&'static str, usize> = data.iter().copied().collect();
+    ///
+    /// let r1: Vec<_> = map.range("key 1"..="key 3").collect();
+    /// assert_eq!(&data, &r1);
+    ///
+    /// let r2: Vec<_> = map.range("key 1".."key 3").collect();
+    /// assert_eq!(&data[..2], &r2);
+    ///
+    /// let r3: Vec<_> = map.range("key 2"..="key 3").collect();
+    /// assert_eq!(&data[1..], &r3);
+    ///
+    /// let r4: Vec<_> = map.range("key 4"..).collect();
+    /// assert!(r4.is_empty());
+    /// ```
     pub fn range<Q, R>(&self, range: R) -> Iter<'_, K, V, FANOUT, LOCAL_GC_BUFFER_SIZE, R, Q>
     where
         R: std::ops::RangeBounds<Q>,
@@ -1333,6 +1479,91 @@ where
                 }
             }
         }
+    }
+}
+
+/// This impl block is for `fetch_max` and `fetch_min` operations on
+/// values that implement `Ord`.
+impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
+    ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
+where
+    K: 'static + Clone + Minimum + Ord + Send + Sync,
+    V: 'static + Clone + Send + Sync + Ord,
+{
+    /// Similar to [`std::sync::atomic::AtomicU64::fetch_min`] in spirit, this
+    /// atomically sets the value to the minimum of the
+    /// previous value and the provided value.
+    ///
+    /// The previous value is returned. None is returned if
+    /// there was no previous value, in which case the
+    /// value is set to the provided value. The value is
+    /// unchanged if the current value is already lower
+    /// than the provided value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = concurrent_map::ConcurrentMap::<&'static str, usize>::default();
+    ///
+    /// // acts as an insertion if no value is present
+    /// assert_eq!(map.fetch_min("key 1", 5), None);
+    ///
+    /// // sets the value to the new lower value, returns the old value
+    /// assert_eq!(map.fetch_min("key 1", 2), Some(5));
+    ///
+    /// // fails to set the value to a lower number, returns the
+    /// // current value.
+    /// assert_eq!(map.fetch_min("key 1", 10), Some(2));
+    ///
+    /// ```
+    pub fn fetch_min(&self, key: K, value: V) -> Option<V> {
+        let f = move |prev_opt: Option<&V>| {
+            if let Some(prev) = prev_opt {
+                Some(prev.min(&value).clone())
+            } else {
+                Some(value.clone())
+            }
+        };
+
+        self.fetch_and_update(key, f)
+    }
+
+    /// Similar to [`std::sync::atomic::AtomicU64::fetch_max`] in spirit, this
+    /// atomically sets the value to the maximum of the
+    /// previous value and the provided value.
+    ///
+    /// The previous value is returned. None is returned if
+    /// there was no previous value, in which case the
+    /// value is set to the provided value. The value is
+    /// unchanged if the current value is already higher
+    /// than the provided value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let map = concurrent_map::ConcurrentMap::<&'static str, usize>::default();
+    ///
+    /// // acts as an insertion if no value is present
+    /// assert_eq!(map.fetch_max("key 1", 5), None);
+    ///
+    /// // sets the value to the new higher value, returns the old value
+    /// assert_eq!(map.fetch_max("key 1", 10), Some(5));
+    ///
+    /// // fails to set the value to a higher number, returns the
+    /// // current value.
+    /// assert_eq!(map.fetch_max("key 1", 2), Some(10));
+    ///
+    /// ```
+    pub fn fetch_max(&self, key: K, value: V) -> Option<V> {
+        let f = move |prev_opt: Option<&V>| {
+            if let Some(prev) = prev_opt {
+                Some(prev.max(&value).clone())
+            } else {
+                Some(value.clone())
+            }
+        };
+
+        self.fetch_and_update(key, f)
     }
 }
 
@@ -2274,6 +2505,7 @@ where
     }
 }
 
+// This ensures that ConcurrentMap is Send and Clone.
 const fn _test_impls() {
     const fn send<T: Send>() {}
     const fn clone<T: Clone>() {}
