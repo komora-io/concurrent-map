@@ -18,7 +18,7 @@ may be beneficial. See the `ConcurrentMap` docs for more details.
 If you want to use a custom key type, you must
 implement the `Minimum` trait,
 allowing the left-most side of the tree to be
-created before inserting any data. 
+created before inserting any data.
 
 This is an ordered data structure, and supports very high throughput iteration over
 lexicographically sorted ranges of values. If you are looking for simple point operation

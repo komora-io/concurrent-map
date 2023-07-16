@@ -422,6 +422,24 @@ impl Minimum for &str {
     const MIN: Self = "";
 }
 
+impl<A: Minimum, B: Minimum> Minimum for (A, B) {
+    const MIN: Self = (A::MIN, B::MIN);
+}
+impl<A: Minimum, B: Minimum, C: Minimum> Minimum for (A, B, C) {
+    const MIN: Self = (A::MIN, B::MIN, C::MIN);
+}
+impl<A: Minimum, B: Minimum, C: Minimum, D: Minimum> Minimum for (A, B, C, D) {
+    const MIN: Self = (A::MIN, B::MIN, C::MIN, D::MIN);
+}
+impl<A: Minimum, B: Minimum, C: Minimum, D: Minimum, E: Minimum> Minimum for (A, B, C, D, E) {
+    const MIN: Self = (A::MIN, B::MIN, C::MIN, D::MIN, E::MIN);
+}
+impl<A: Minimum, B: Minimum, C: Minimum, D: Minimum, E: Minimum, F: Minimum> Minimum
+    for (A, B, C, D, E, F)
+{
+    const MIN: Self = (A::MIN, B::MIN, C::MIN, D::MIN, E::MIN, F::MIN);
+}
+
 /// A lock-free B+ tree.
 ///
 /// Note that this structure is `Send` but NOT `Sync`,
