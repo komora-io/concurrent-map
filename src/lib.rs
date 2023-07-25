@@ -2311,7 +2311,7 @@ where
             lo: min_key,
             hi: None,
             next: None,
-            data: Data::Index(Default::default()),
+            data: Data::Index(StackMap::new()),
             merging_child: None,
             is_merging: false,
         })
@@ -2322,7 +2322,7 @@ where
             lo,
             hi: None,
             next: None,
-            data: Data::Leaf(Default::default()),
+            data: Data::Leaf(StackMap::new()),
             merging_child: None,
             is_merging: false,
         })
