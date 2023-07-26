@@ -135,6 +135,10 @@ use stack_map::StackMap;
 
 use std::borrow::Borrow;
 use std::fmt;
+use std::num::{
+    NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize, NonZeroU128,
+    NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize,
+};
 use std::ops::{Bound, Deref};
 use std::ptr::NonNull;
 use std::sync::{
@@ -400,7 +404,32 @@ macro_rules! impl_integer {
     }
 }
 
-impl_integer!(usize, u8, u16, u32, u64, u128, isize, i8, i16, i32, i64, i128);
+impl_integer!(
+    usize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    isize,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    NonZeroI128,
+    NonZeroI16,
+    NonZeroI32,
+    NonZeroI64,
+    NonZeroI8,
+    NonZeroIsize,
+    NonZeroU128,
+    NonZeroU16,
+    NonZeroU32,
+    NonZeroU64,
+    NonZeroU8,
+    NonZeroUsize
+);
 
 impl<T: Ord> Minimum for Vec<T> {
     const MIN: Self = Vec::new();
