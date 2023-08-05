@@ -754,6 +754,25 @@ where
         leaf.get(key)
     }
 
+    /// Returns `true` if the `ConcurrentMap` contains the specified key.
+    ///
+    /// # Examples
+    /// ```
+    /// let map = concurrent_map::ConcurrentMap::<usize, usize>::default();
+    ///
+    /// map.insert(1, 1);
+    ///
+    /// assert!(map.contains_key(&1));
+    /// assert!(!map.contains_key(&2));
+    /// ```
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
     /// Atomically get a key and value out of the map that is associated with the key that
     /// is lexicographically less than the provided key.
     ///
