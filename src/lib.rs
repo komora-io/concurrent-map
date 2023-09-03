@@ -852,9 +852,31 @@ where
         K: Borrow<Q>,
         Q: ?Sized + Ord + PartialEq,
     {
-        let start = Bound::Unbounded;
-        let end = Bound::Included(key);
-        self.range((start, end)).next_back()
+        let mut guard = self.ebr.pin();
+        let end = LeafSearch::Eq(key.borrow());
+        let current_back = self.inner.leaf_for_key(end, &mut guard);
+
+        // fast path
+        if let Some((k, v)) = current_back.leaf().get_less_than_or_equal(key) {
+            return Some((k.clone(), v.clone()));
+        }
+
+        // slow path: fall back to reverse iterator
+        let current = self
+            .inner
+            .leaf_for_key(LeafSearch::Eq(K::MIN.borrow()), &mut guard);
+
+        Iter {
+            guard,
+            inner: &self.inner,
+            range: (Bound::Unbounded, Bound::Included(key.borrow())),
+            current,
+            current_back,
+            next_index: 0,
+            next_index_from_back: 0,
+            q: std::marker::PhantomData,
+        }
+        .next_back()
     }
 
     /// Atomically get a key and value out of the map that is associated with the key
