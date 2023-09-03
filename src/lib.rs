@@ -386,6 +386,10 @@ impl Minimum for () {
     const MIN: Self = ();
 }
 
+impl Minimum for bool {
+    const MIN: Self = false;
+}
+
 impl<T: Maximum> Minimum for std::cmp::Reverse<T> {
     const MIN: Self = std::cmp::Reverse(T::MAX);
 }
@@ -726,6 +730,18 @@ where
     K: 'static + Clone + Minimum + Ord + Send + Sync,
     V: 'static + Clone + Send + Sync,
 {
+    /// Creates a new empty `ConcurrentMap<K, V, ...>`.
+    ///
+    /// # Examples
+    /// ```
+    /// use concurrent_map::ConcurrentMap;
+    ///
+    /// let cm: ConcurrentMap<bool, usize> = ConcurrentMap::new();
+    /// ```
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Atomically get a value out of the map that is associated with this key.
     ///
     /// # Examples
@@ -1548,8 +1564,8 @@ where
     }
 }
 
-/// This impl block is for `fetch_max` and `fetch_min` operations on
-/// values that implement `Ord`.
+// This impl block is for `fetch_max` and `fetch_min` operations on
+// values that implement `Ord`.
 impl<K, V, const FANOUT: usize, const LOCAL_GC_BUFFER_SIZE: usize>
     ConcurrentMap<K, V, FANOUT, LOCAL_GC_BUFFER_SIZE>
 where
