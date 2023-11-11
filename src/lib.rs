@@ -853,7 +853,7 @@ where
         Q: ?Sized + Ord + PartialEq,
     {
         let mut guard = self.ebr.pin();
-        let end = LeafSearch::Eq(key.borrow());
+        let end = LeafSearch::Eq(key);
         let current_back = self.inner.leaf_for_key(end, &mut guard);
 
         // fast path
@@ -869,7 +869,7 @@ where
         Iter {
             guard,
             inner: &self.inner,
-            range: (Bound::Unbounded, Bound::Included(key.borrow())),
+            range: (Bound::Unbounded, Bound::Included(key)),
             current,
             current_back,
             next_index: 0,
@@ -934,8 +934,7 @@ where
         K: Borrow<Q>,
         Q: ?Sized + Ord + PartialEq,
     {
-        self.range((Bound::Included(key.borrow()), Bound::Unbounded))
-            .next()
+        self.range((Bound::Included(key), Bound::Unbounded)).next()
     }
 
     /// Get the minimum item stored in this structure.

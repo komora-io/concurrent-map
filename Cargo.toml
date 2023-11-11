@@ -2,7 +2,7 @@
 name = "concurrent-map"
 authors = ["Tyler Neely <tylerneely@gmail.com>"]
 description = "a lock-free linearizable B+ tree"
-version = "5.0.31"
+version = "5.0.32"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/komora-io/concurrent-map"
@@ -25,8 +25,7 @@ fuzz_constants = []
 serde = ["dep:serde"]
 
 [dependencies]
-ebr = { version = "0.2.3", path = "../ebr" }
-stack-map = "1.0.3"
+ebr = { version = "0.2.10" }
+stack-map = "1.0.5"
 rand = { version = "0.8.5", optional = true }
-serde = { version = "1.0.160", optional = true }
-
+serde = { version = "1.0.192", optional = true }
