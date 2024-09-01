@@ -160,6 +160,7 @@ enum Deferred<
     V: 'static + Clone + Send + Sync,
     const FANOUT: usize,
 > {
+    #[allow(unused)]
     Node(Box<Node<K, V, FANOUT>>),
     BoxedAtomicPtr(BoxedAtomicPtr<K, V, FANOUT>),
 }
