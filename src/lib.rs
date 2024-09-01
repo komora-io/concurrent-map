@@ -688,9 +688,8 @@ where
                 assert!(!next.0.is_null());
                 let sibling_cursor = next.node_view(&mut guard).unwrap();
 
-                let fill_phy = ((std::mem::size_of::<K>() + std::mem::size_of::<V>())
-                    * sibling_cursor.len()) as f64
-                    / std::mem::size_of::<Node<K, V, FANOUT>>() as f64;
+                let fill_phy = ((size_of::<K>() + size_of::<V>()) * sibling_cursor.len()) as f64
+                    / size_of::<Node<K, V, FANOUT>>() as f64;
                 min_fill_physical = min_fill_physical.min(fill_phy);
                 max_fill_physical = max_fill_physical.max(fill_phy);
                 fill_sum_physical += fill_phy;
