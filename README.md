@@ -24,3 +24,5 @@ This is an ordered data structure, and supports very high throughput iteration o
 lexicographically sorted ranges of values. If you are looking for simple point operation
 performance, you may find a better option among one of the many concurrent
 hashmap implementations that are floating around. Pay for what you actually use :)
+
+The minimum supported rust version (MSRV) is `1.70`.
